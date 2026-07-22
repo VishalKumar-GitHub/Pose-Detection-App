@@ -2,13 +2,14 @@ import io
 import os
 import streamlit as st
 import numpy as np
-from mediapipe.solutions import pose as mp_pose
-from mediapipe.solutions import pose_connections as mp_pose_connections
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 import av
 import threading
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import urllib.request
 
 # ---------- Page config ----------
 st.set_page_config(page_title="Pose Detection & Analysis", layout="wide")
@@ -29,7 +30,49 @@ page_bg_css = """
 """
 st.markdown(page_bg_css, unsafe_allow_html=True)
 
-# ---------- MediaPipe setup ----------
+# Pose landmark indices for the new API
+class PoseLandmark:
+    NOSE = 0
+    LEFT_EYE_INNER = 1
+    LEFT_EYE = 2
+    LEFT_EYE_OUTER = 3
+    RIGHT_EYE_INNER = 4
+    RIGHT_EYE = 5
+    RIGHT_EYE_OUTER = 6
+    LEFT_EAR = 7
+    RIGHT_EAR = 8
+    LEFT_MOUTH_CORNER = 9
+    RIGHT_MOUTH_CORNER = 10
+    LEFT_SHOULDER = 11
+    RIGHT_SHOULDER = 12
+    LEFT_ELBOW = 13
+    RIGHT_ELBOW = 14
+    LEFT_WRIST = 15
+    RIGHT_WRIST = 16
+    LEFT_PINKY = 17
+    RIGHT_PINKY = 18
+    LEFT_INDEX = 19
+    RIGHT_INDEX = 20
+    LEFT_THUMB = 21
+    RIGHT_THUMB = 22
+    LEFT_HIP = 23
+    RIGHT_HIP = 24
+    LEFT_KNEE = 25
+    RIGHT_KNEE = 26
+    LEFT_ANKLE = 27
+    RIGHT_ANKLE = 28
+    LEFT_HEEL = 29
+    RIGHT_HEEL = 30
+    LEFT_FOOT_INDEX = 31
+    RIGHT_FOOT_INDEX = 32
+
+# Pose connections
+POSE_CONNECTIONS = [
+    (11, 13), (13, 15), (12, 14), (14, 16),  # Arms
+    (11, 12), (11, 23), (12, 24),  # Shoulders to hips
+    (23, 25), (25, 27), (24, 26), (26, 28),  # Legs
+    (27, 29), (29, 31), (28, 30), (30, 32),  # Feet
+]
 
 # ---------- Sidebar ----------
 st.sidebar.title("Customization Options")
@@ -69,11 +112,13 @@ def calc_angle(a, b, c):
 
 
 def analyze_pose(landmarks):
-    lm = mp_pose.PoseLandmark
+    lm = PoseLandmark
     info = {}
 
     def pt(l):
-        return [landmarks[l].x, landmarks[l].y]
+        if l < len(landmarks):
+            return [landmarks[l].x, landmarks[l].y]
+        return [0, 0]
 
     l_arm = calc_angle(pt(lm.LEFT_SHOULDER), pt(lm.LEFT_ELBOW), pt(lm.LEFT_WRIST))
     r_arm = calc_angle(pt(lm.RIGHT_SHOULDER), pt(lm.RIGHT_ELBOW), pt(lm.RIGHT_WRIST))
@@ -99,36 +144,28 @@ def get_font(size):
 
 
 def draw_text_overlay(frame, info, cfg):
-    pil_img = Image.fromarray(frame)
-    draw = ImageDraw.Draw(pil_img)
-    font = get_font(int(16 * cfg["text_size"]))
+    pil = Image.fromarray(frame)
+    draw = ImageDraw.Draw(pil)
+    font = get_font(int(20 * cfg["text_size"]))
     y = 10
-    for k, v in info.items():
-        draw.text((10, y), f"{k}: {v}", fill=cfg["text_rgb"], font=font)
-        y += int(24 * cfg["text_size"])
-    return np.array(pil_img)
-
-
-def draw_and_analyze(frame, results, cfg):
-    if results.pose_landmarks:
-
-        frame = draw_landmarks_pil(frame, results.pose_landmarks.landmark, cfg)
-
-        info = analyze_pose(results.pose_landmarks.landmark)
-        frame = draw_text_overlay(frame, info, cfg)
-    return frame
+    for key, value in info.items():
+        text = f"{key}: {value}"
+        draw.text((10, y), text, font=font, fill=cfg["text_rgb"])
+        y += 30
+    return np.array(pil)
 
 
 def draw_landmarks_pil(frame, landmarks, cfg):
     pil = Image.fromarray(frame)
     draw = ImageDraw.Draw(pil)
     width, height = pil.size
-    for connection in mp_pose_connections.POSE_CONNECTIONS:
-        start = landmarks[connection[0]]
-        end = landmarks[connection[1]]
-        x1, y1 = int(start.x * width), int(start.y * height)
-        x2, y2 = int(end.x * width), int(end.y * height)
-        draw.line([(x1, y1), (x2, y2)], fill=cfg["line_rgb"], width=cfg["line_thickness"])
+    for connection in POSE_CONNECTIONS:
+        if connection[0] < len(landmarks) and connection[1] < len(landmarks):
+            start = landmarks[connection[0]]
+            end = landmarks[connection[1]]
+            x1, y1 = int(start.x * width), int(start.y * height)
+            x2, y2 = int(end.x * width), int(end.y * height)
+            draw.line([(x1, y1), (x2, y2)], fill=cfg["line_rgb"], width=cfg["line_thickness"])
     for landmark in landmarks:
         x, y = int(landmark.x * width), int(landmark.y * height)
         radius = cfg["circle_radius"]
@@ -139,30 +176,66 @@ def draw_landmarks_pil(frame, landmarks, cfg):
     return np.array(pil)
 
 
-def process_static(frame, pose, cfg):
-    pil = Image.fromarray(frame)
+def draw_and_analyze(frame, landmarks, cfg):
+    if landmarks:
+        frame = draw_landmarks_pil(frame, landmarks, cfg)
+        info = analyze_pose(landmarks)
+        frame = draw_text_overlay(frame, info, cfg)
+    return frame
+
+
+def process_static(img, landmarks, cfg):
+    pil = Image.fromarray(img)
     pil = pil.resize((width, height), Image.Resampling.LANCZOS)
     rgb = np.array(pil)
-    results = pose.process(rgb)
-    return draw_and_analyze(rgb, results, cfg)
+    return draw_and_analyze(rgb, landmarks, cfg)
+
+
+# ---------- Download and load pose landmarker model ----------
+@st.cache_resource
+def get_pose_landmarker():
+    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_lite.tflite")
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    
+    if not os.path.exists(model_path):
+        st.info("Downloading pose detection model...")
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/pose_landmarker_lite.tflite"
+        try:
+            urllib.request.urlretrieve(url, model_path)
+        except Exception as e:
+            st.error(f"Failed to download model: {e}")
+            return None
+    
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    options = vision.PoseLandmarkerOptions(base_options=base_options)
+    return vision.PoseLandmarker.create_from_options(options)
 
 
 # ---------- Live camera processor ----------
 class PoseProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-        self.cfg = build_cfg()          # updated live from the main thread
+        self.pose_landmarker = get_pose_landmarker()
+        self.cfg = build_cfg()
         self.lock = threading.Lock()
-        self.snapshot = None            # last processed frame, for download
+        self.snapshot = None
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
-        results = self.pose.process(img)
-        with self.lock:
-            cfg = self.cfg
-        img = draw_and_analyze(img, results, cfg)
-        with self.lock:
-            self.snapshot = img.copy()
+        
+        if self.pose_landmarker:
+            # Create MediaPipe Image
+            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(img))
+            detection_result = self.pose_landmarker.detect(mp_image)
+            
+            with self.lock:
+                cfg = self.cfg
+            
+            if detection_result.pose_landmarks:
+                img = draw_and_analyze(img, detection_result.pose_landmarks[0], cfg)
+            
+            with self.lock:
+                self.snapshot = img.copy()
+        
         return av.VideoFrame.from_ndarray(img, format="rgb24")
 
 
@@ -184,12 +257,10 @@ if input_type == "Live Camera":
         async_processing=True,
     )
 
-    # push current slider values into the running processor every rerun
     if ctx.video_processor:
         with ctx.video_processor.lock:
             ctx.video_processor.cfg = build_cfg()
 
-    # snapshot / download
     if ctx.video_processor and st.button("📸 Take Snapshot"):
         with ctx.video_processor.lock:
             snap = ctx.video_processor.snapshot
@@ -206,8 +277,19 @@ elif input_type == "Upload Image":
     file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
     if file:
         image = np.array(Image.open(file).convert("RGB"))
-        with mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
-            out = process_static(image, pose, build_cfg())
+        pose_landmarker = get_pose_landmarker()
+        
+        if pose_landmarker:
+            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(image))
+            detection_result = pose_landmarker.detect(mp_image)
+            
+            if detection_result.pose_landmarks:
+                out = process_static(image, detection_result.pose_landmarks[0], build_cfg())
+            else:
+                out = image
+        else:
+            out = image
+        
         st.image(out, channels="RGB")
         buffer = io.BytesIO()
         Image.fromarray(out).save(buffer, format="PNG")
@@ -225,11 +307,20 @@ elif input_type == "Upload Video":
             container = av.open(tfile.name)
             stframe = st.empty()
             cfg = build_cfg()
-            with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+            pose_landmarker = get_pose_landmarker()
+            
+            if pose_landmarker:
                 for packet in container.demux(video=0):
                     for frame in packet.decode():
                         img = frame.to_ndarray(format="rgb24")
-                        out = process_static(img, pose, cfg)
+                        mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(img))
+                        detection_result = pose_landmarker.detect(mp_image)
+                        
+                        if detection_result.pose_landmarks:
+                            out = process_static(img, detection_result.pose_landmarks[0], cfg)
+                        else:
+                            out = img
+                        
                         stframe.image(out, channels="RGB")
             container.close()
         finally:
