@@ -194,16 +194,28 @@ def process_static(img, landmarks, cfg):
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
 def get_pose_landmarker():
-    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_lite.tflite")
+    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker.tflite")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
     if not os.path.exists(model_path):
         st.info("Downloading pose detection model...")
-        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/pose_landmarker_lite.tflite"
-        try:
-            urllib.request.urlretrieve(url, model_path)
-        except Exception as e:
-            st.error(f"Failed to download model: {e}")
+        # Try full model first, then lite as fallback
+        urls = [
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float32/pose_landmarker_full.tflite",
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float32/pose_landmarker_heavy.tflite",
+        ]
+        
+        downloaded = False
+        for url in urls:
+            try:
+                urllib.request.urlretrieve(url, model_path)
+                downloaded = True
+                break
+            except Exception:
+                continue
+        
+        if not downloaded:
+            st.error("Failed to download pose detection model. Check your internet connection.")
             return None
     
     base_options = python.BaseOptions(model_asset_path=model_path)
