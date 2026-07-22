@@ -2,14 +2,33 @@ import io
 import os
 import streamlit as st
 import numpy as np
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
-import av
 import threading
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import urllib.request
+
+# Import mediapipe components with error handling
+try:
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+except ImportError as e:
+    print(f"Error importing mediapipe: {e}")
+    st.error(f"Failed to import MediaPipe: {str(e)}\n\nPlease check if mediapipe is properly installed.")
+    st.stop()
+
+try:
+    import av
+except ImportError as e:
+    print(f"Error importing av: {e}")
+    st.error(f"Failed to import PyAV: {str(e)}")
+    st.stop()
+
+try:
+    from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+except ImportError as e:
+    print(f"Error importing streamlit_webrtc: {e}")
+    st.error(f"Failed to import streamlit-webrtc: {str(e)}")
+    st.stop()
 
 # ---------- Page config ----------
 st.set_page_config(page_title="Pose Detection & Analysis", layout="wide")
