@@ -222,34 +222,58 @@ def process_static(img, landmarks, cfg):
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
+@st.cache_resource
 def get_pose_landmarker():
     model_path = os.path.expanduser("~/.mediapipe/pose_landmarker.tflite")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
     if not os.path.exists(model_path):
-        st.info("Downloading pose detection model...")
-        # Try full model first, then lite as fallback
+        st.info("📥 Downloading pose detection model (50MB)...")
+        
+        # Multiple model variants with fallback options
         urls = [
             "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float32/pose_landmarker_full.tflite",
             "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float32/pose_landmarker_heavy.tflite",
         ]
         
         downloaded = False
+        last_error = None
+        
         for url in urls:
             try:
-                urllib.request.urlretrieve(url, model_path)
-                downloaded = True
-                break
-            except Exception:
-                continue
+                print(f"Attempting to download from: {url}")
+                with st.spinner(f"Downloading from {url.split('/')[-1]}..."):
+                    urllib.request.urlretrieve(url, model_path, timeout=60)
+                    print(f"✓ Successfully downloaded model from {url}")
+                    downloaded = True
+                    st.success("✓ Model downloaded successfully!")
+                    break
+            except urllib.error.HTTPError as e:
+                last_error = f"HTTP {e.code}: {e.reason}"
+                print(f"✗ HTTP Error from {url}: {last_error}")
+            except urllib.error.URLError as e:
+                last_error = f"Connection error: {e.reason}"
+                print(f"✗ Connection error for {url}: {last_error}")
+            except Exception as e:
+                last_error = str(e)
+                print(f"✗ Unexpected error for {url}: {last_error}")
         
         if not downloaded:
-            st.error("Failed to download pose detection model. Check your internet connection.")
+            error_msg = f"Failed to download model. Last error: {last_error}"
+            print(f"✗ {error_msg}")
+            st.error(f"❌ {error_msg}\n\nTroubleshooting:\n- Check internet connection\n- Try reloading the page\n- Check firewall/proxy settings")
             return None
     
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    options = vision.PoseLandmarkerOptions(base_options=base_options)
-    return vision.PoseLandmarker.create_from_options(options)
+    try:
+        base_options = python.BaseOptions(model_asset_path=model_path)
+        options = vision.PoseLandmarkerOptions(base_options=base_options)
+        landmarker = vision.PoseLandmarker.create_from_options(options)
+        print("✓ PoseLandmarker initialized successfully")
+        return landmarker
+    except Exception as e:
+        st.error(f"❌ Failed to initialize pose landmarker: {str(e)}")
+        print(f"✗ Initialization error: {str(e)}")
+        return None
 
 
 # ---------- Live camera processor ----------
