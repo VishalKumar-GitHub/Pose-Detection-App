@@ -11,23 +11,26 @@ import urllib.request
 try:
     from mediapipe.tasks import python
     from mediapipe.tasks.python import vision
+    print("✓ MediaPipe imported successfully")
 except ImportError as e:
-    print(f"Error importing mediapipe: {e}")
-    st.error(f"Failed to import MediaPipe: {str(e)}\n\nPlease check if mediapipe is properly installed.")
+    print(f"✗ Error importing mediapipe: {e}")
+    st.error(f"❌ Failed to import MediaPipe: {str(e)}\n\nPlease check if mediapipe is properly installed on the system.")
     st.stop()
 
 try:
     import av
+    print("✓ PyAV imported successfully")
 except ImportError as e:
-    print(f"Error importing av: {e}")
-    st.error(f"Failed to import PyAV: {str(e)}")
+    print(f"✗ Error importing av: {e}")
+    st.error(f"❌ Failed to import PyAV: {str(e)}")
     st.stop()
 
 try:
     from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+    print("✓ streamlit-webrtc imported successfully")
 except ImportError as e:
-    print(f"Error importing streamlit_webrtc: {e}")
-    st.error(f"Failed to import streamlit-webrtc: {str(e)}")
+    print(f"✗ Error importing streamlit_webrtc: {e}")
+    st.error(f"❌ Failed to import streamlit-webrtc: {str(e)}")
     st.stop()
 
 # ---------- Page config ----------
