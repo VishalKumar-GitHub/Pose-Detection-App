@@ -185,16 +185,16 @@ def draw_landmarks_pil(frame, landmarks, cfg):
     draw = ImageDraw.Draw(pil)
     width, height = pil.size
     
-    # Draw connections
+    # Draw connections (with lower confidence threshold)
     for connection in POSE_CONNECTIONS:
         if connection[0] < len(landmarks) and connection[1] < len(landmarks):
             start = landmarks[connection[0]]
             end = landmarks[connection[1]]
             
-            # Skip if confidence is too low
-            if hasattr(start, 'presence') and start.presence < 0.5:
+            # Skip if confidence is too low (threshold: 0.3 instead of 0.5)
+            if hasattr(start, 'presence') and start.presence < 0.3:
                 continue
-            if hasattr(end, 'presence') and end.presence < 0.5:
+            if hasattr(end, 'presence') and end.presence < 0.3:
                 continue
             
             x1, y1 = int(start.x * width), int(start.y * height)
@@ -206,10 +206,10 @@ def draw_landmarks_pil(frame, landmarks, cfg):
             
             draw.line([(x1, y1), (x2, y2)], fill=cfg["line_rgb"], width=cfg["line_thickness"])
     
-    # Draw circles for landmarks
+    # Draw circles for landmarks (with lower confidence threshold)
     for landmark in landmarks:
         # Skip if confidence is too low
-        if hasattr(landmark, 'presence') and landmark.presence < 0.5:
+        if hasattr(landmark, 'presence') and landmark.presence < 0.3:
             continue
         
         x, y = int(landmark.x * width), int(landmark.y * height)
@@ -311,20 +311,37 @@ class PoseProcessor(VideoProcessorBase):
         
         if self.pose_landmarker:
             try:
-                # Create MediaPipe Image - pass numpy array directly
+                # Ensure image is correct format
+                if img.dtype != np.uint8:
+                    img = (img * 255).astype(np.uint8)
+                
+                # Create MediaPipe Image
                 mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=img)
                 detection_result = self.pose_landmarker.detect(mp_image)
                 
                 with self.lock:
                     cfg = self.cfg
                 
+                # Debug: Log detection info
+                num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
+                print(f"[DEBUG] Detections found: {num_detections}, Image shape: {img.shape}")
+                
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                    img = draw_and_analyze(img, detection_result.pose_landmarks[0], cfg)
+                    landmarks = detection_result.pose_landmarks[0]
+                    print(f"[DEBUG] First detection has {len(landmarks)} landmarks")
+                    if len(landmarks) > 0:
+                        print(f"[DEBUG] First landmark: x={landmarks[0].x:.3f}, y={landmarks[0].y:.3f}, presence={landmarks[0].presence:.3f}")
+                    
+                    img = draw_and_analyze(img, landmarks, cfg)
+                else:
+                    print(f"[DEBUG] No pose detected in frame")
                 
                 with self.lock:
                     self.snapshot = img.copy()
             except Exception as e:
-                print(f"Error in pose detection: {e}")
+                print(f"[ERROR] Pose detection error: {e}")
+                import traceback
+                traceback.print_exc()
         
         return av.VideoFrame.from_ndarray(img, format="rgb24")
 
@@ -367,6 +384,8 @@ elif input_type == "Upload Image":
     file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
     if file:
         image = np.array(Image.open(file).convert("RGB"))
+        st.info(f"📊 Image shape: {image.shape}, dtype: {image.dtype}")
+        
         pose_landmarker = get_pose_landmarker()
         
         if pose_landmarker:
@@ -374,15 +393,21 @@ elif input_type == "Upload Image":
                 mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=image)
                 detection_result = pose_landmarker.detect(mp_image)
                 
+                num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
+                print(f"[DEBUG] Image upload - Detections: {num_detections}")
+                
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                    st.success(f"✓ Pose detected! Found {len(detection_result.pose_landmarks)} person(s)")
                     out = process_static(image, detection_result.pose_landmarks[0], build_cfg())
                 else:
-                    st.warning("No pose detected in the image")
+                    st.warning("❌ No pose detected in the image. Try a clearer photo with a visible person.")
                     out = image
             except Exception as e:
-                st.error(f"Detection error: {e}")
+                st.error(f"❌ Detection error: {e}")
+                print(f"[ERROR] Image upload detection: {e}")
                 out = image
         else:
+            st.error("❌ Failed to load pose detection model")
             out = image
         
         st.image(out, channels="RGB")
