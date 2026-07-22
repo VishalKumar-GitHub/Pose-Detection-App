@@ -2,8 +2,8 @@ import io
 import os
 import streamlit as st
 import numpy as np
-from mediapipe.python.solutions import pose as mp_pose
-from mediapipe.python.solutions import pose_connections as mp_pose_connections
+from mediapipe.solutions import pose as mp_pose
+from mediapipe.solutions import pose_connections as mp_pose_connections
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 import av
