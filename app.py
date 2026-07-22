@@ -156,23 +156,52 @@ def draw_text_overlay(frame, info, cfg):
 
 
 def draw_landmarks_pil(frame, landmarks, cfg):
+    if not landmarks:
+        return frame
+    
     pil = Image.fromarray(frame)
     draw = ImageDraw.Draw(pil)
     width, height = pil.size
+    
+    # Draw connections
     for connection in POSE_CONNECTIONS:
         if connection[0] < len(landmarks) and connection[1] < len(landmarks):
             start = landmarks[connection[0]]
             end = landmarks[connection[1]]
+            
+            # Skip if confidence is too low
+            if hasattr(start, 'presence') and start.presence < 0.5:
+                continue
+            if hasattr(end, 'presence') and end.presence < 0.5:
+                continue
+            
             x1, y1 = int(start.x * width), int(start.y * height)
             x2, y2 = int(end.x * width), int(end.y * height)
+            
+            # Clamp to frame bounds
+            x1, y1 = max(0, min(width-1, x1)), max(0, min(height-1, y1))
+            x2, y2 = max(0, min(width-1, x2)), max(0, min(height-1, y2))
+            
             draw.line([(x1, y1), (x2, y2)], fill=cfg["line_rgb"], width=cfg["line_thickness"])
+    
+    # Draw circles for landmarks
     for landmark in landmarks:
+        # Skip if confidence is too low
+        if hasattr(landmark, 'presence') and landmark.presence < 0.5:
+            continue
+        
         x, y = int(landmark.x * width), int(landmark.y * height)
+        
+        # Clamp to frame bounds
+        x = max(0, min(width-1, x))
+        y = max(0, min(height-1, y))
+        
         radius = cfg["circle_radius"]
         draw.ellipse(
             [(x - radius, y - radius), (x + radius, y + radius)],
             fill=cfg["circle_rgb"], outline=cfg["circle_rgb"],
         )
+    
     return np.array(pil)
 
 
@@ -235,18 +264,21 @@ class PoseProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="rgb24")
         
         if self.pose_landmarker:
-            # Create MediaPipe Image
-            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(img))
-            detection_result = self.pose_landmarker.detect(mp_image)
-            
-            with self.lock:
-                cfg = self.cfg
-            
-            if detection_result.pose_landmarks:
-                img = draw_and_analyze(img, detection_result.pose_landmarks[0], cfg)
-            
-            with self.lock:
-                self.snapshot = img.copy()
+            try:
+                # Create MediaPipe Image - pass numpy array directly
+                mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=img)
+                detection_result = self.pose_landmarker.detect(mp_image)
+                
+                with self.lock:
+                    cfg = self.cfg
+                
+                if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                    img = draw_and_analyze(img, detection_result.pose_landmarks[0], cfg)
+                
+                with self.lock:
+                    self.snapshot = img.copy()
+            except Exception as e:
+                print(f"Error in pose detection: {e}")
         
         return av.VideoFrame.from_ndarray(img, format="rgb24")
 
@@ -292,12 +324,17 @@ elif input_type == "Upload Image":
         pose_landmarker = get_pose_landmarker()
         
         if pose_landmarker:
-            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(image))
-            detection_result = pose_landmarker.detect(mp_image)
-            
-            if detection_result.pose_landmarks:
-                out = process_static(image, detection_result.pose_landmarks[0], build_cfg())
-            else:
+            try:
+                mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=image)
+                detection_result = pose_landmarker.detect(mp_image)
+                
+                if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                    out = process_static(image, detection_result.pose_landmarks[0], build_cfg())
+                else:
+                    st.warning("No pose detected in the image")
+                    out = image
+            except Exception as e:
+                st.error(f"Detection error: {e}")
                 out = image
         else:
             out = image
@@ -325,12 +362,16 @@ elif input_type == "Upload Video":
                 for packet in container.demux(video=0):
                     for frame in packet.decode():
                         img = frame.to_ndarray(format="rgb24")
-                        mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=Image.fromarray(img))
-                        detection_result = pose_landmarker.detect(mp_image)
-                        
-                        if detection_result.pose_landmarks:
-                            out = process_static(img, detection_result.pose_landmarks[0], cfg)
-                        else:
+                        try:
+                            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=img)
+                            detection_result = pose_landmarker.detect(mp_image)
+                            
+                            if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                                out = process_static(img, detection_result.pose_landmarks[0], cfg)
+                            else:
+                                out = img
+                        except Exception as e:
+                            print(f"Frame detection error: {e}")
                             out = img
                         
                         stframe.image(out, channels="RGB")
