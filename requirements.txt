@@ -1,0 +1,6 @@
+streamlit==1.60.0
+streamlit-webrtc==0.76.2
+mediapipe==0.10.35
+numpy==2.4.6
+Pillow==12.3.0
+av==17.1.0
