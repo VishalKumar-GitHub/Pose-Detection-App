@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw, ImageFont
 import tempfile
 import threading
 import urllib.request
+import time
 
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -376,18 +377,76 @@ class PoseProcessor(VideoProcessorBase):
         self.rep_depth_hit = False
         self.rep_flags = set()
         self.last_feedback = "Ready"
+        self.set_active = True
+        self.set_start_time = time.time()
+        self.rep_timestamps = []
+        self.rep_depths = []
+        self.current_rep_min_knee = 180.0
+
+    def reset_set_stats(self):
+        self.rep_count = 0
+        self.bad_rep_count = 0
+        self.squat_phase = "up"
+        self.rep_depth_hit = False
+        self.rep_flags = set()
+        self.last_feedback = "Ready"
+        self.rep_timestamps = []
+        self.rep_depths = []
+        self.current_rep_min_knee = 180.0
+        self.set_start_time = time.time()
+
+    def get_analytics(self):
+        elapsed = max(1.0, time.time() - self.set_start_time)
+        total_attempts = self.rep_count + self.bad_rep_count
+        valid_rate = (self.rep_count / total_attempts * 100.0) if total_attempts > 0 else 0.0
+        avg_depth = (sum(self.rep_depths) / len(self.rep_depths)) if self.rep_depths else 0.0
+        reps_per_min = self.rep_count / (elapsed / 60.0)
+
+        avg_tempo = 0.0
+        if len(self.rep_timestamps) >= 2:
+            diffs = [self.rep_timestamps[i] - self.rep_timestamps[i - 1] for i in range(1, len(self.rep_timestamps))]
+            avg_tempo = sum(diffs) / len(diffs)
+
+        form_score = max(0.0, min(100.0, valid_rate))
+        return {
+            "elapsed_sec": elapsed,
+            "valid_rate": valid_rate,
+            "avg_depth": avg_depth,
+            "reps_per_min": reps_per_min,
+            "avg_tempo": avg_tempo,
+            "form_score": form_score,
+            "set_active": self.set_active,
+        }
 
     def update_squat_state(self, landmarks):
         metrics = get_squat_metrics(landmarks)
         warnings = get_squat_warnings(metrics)
         knee_angle = metrics["avg_knee_angle"]
 
+        if not self.set_active:
+            analytics = self.get_analytics()
+            warning_text = "none" if not warnings else ", ".join(warnings)
+            return {
+                "Exercise": "Squat Counter",
+                "Set Status": "paused",
+                "Reps": str(self.rep_count),
+                "No-Reps": str(self.bad_rep_count),
+                "RPM": f"{analytics['reps_per_min']:.1f}",
+                "Avg Depth": (f"{analytics['avg_depth']:.1f}" if analytics["avg_depth"] > 0 else "n/a"),
+                "Form Score": f"{analytics['form_score']:.0f}/100",
+                "Knee Angle": f"{knee_angle:.1f}",
+                "Form Warnings": warning_text,
+                "Rep Feedback": "Set paused",
+            }
+
         if self.squat_phase == "up" and knee_angle < 125:
             self.squat_phase = "down"
             self.rep_depth_hit = False
             self.rep_flags = set()
+            self.current_rep_min_knee = knee_angle
 
         if self.squat_phase == "down":
+            self.current_rep_min_knee = min(self.current_rep_min_knee, knee_angle)
             if knee_angle < 95:
                 self.rep_depth_hit = True
             for warning in warnings:
@@ -407,17 +466,25 @@ class PoseProcessor(VideoProcessorBase):
                     self.last_feedback = "No rep: " + ", ".join(reasons)
                 else:
                     self.rep_count += 1
+                    self.rep_timestamps.append(time.time())
+                    self.rep_depths.append(self.current_rep_min_knee)
                     self.last_feedback = "Good rep"
 
                 self.squat_phase = "up"
                 self.rep_depth_hit = False
                 self.rep_flags = set()
+                self.current_rep_min_knee = 180.0
 
+        analytics = self.get_analytics()
         warning_text = "none" if not warnings else ", ".join(warnings)
         return {
             "Exercise": "Squat Counter",
+            "Set Status": "active",
             "Reps": str(self.rep_count),
             "No-Reps": str(self.bad_rep_count),
+            "RPM": f"{analytics['reps_per_min']:.1f}",
+            "Avg Depth": (f"{analytics['avg_depth']:.1f}" if analytics["avg_depth"] > 0 else "n/a"),
+            "Form Score": f"{analytics['form_score']:.0f}/100",
             "Phase": self.squat_phase,
             "Knee Angle": f"{knee_angle:.1f}",
             "Form Warnings": warning_text,
@@ -490,16 +557,35 @@ if input_type == "Live Camera":
             ctx.video_processor.cfg = build_cfg()
 
     if ctx.video_processor and workout_mode == "Squat Counter":
+        controls1, controls2, controls3 = st.columns(3)
+        if controls1.button("Start Set"):
+            with ctx.video_processor.lock:
+                ctx.video_processor.set_active = True
+                if ctx.video_processor.set_start_time is None:
+                    ctx.video_processor.set_start_time = time.time()
+        if controls2.button("Pause Set"):
+            with ctx.video_processor.lock:
+                ctx.video_processor.set_active = False
+        if controls3.button("Reset Set"):
+            with ctx.video_processor.lock:
+                ctx.video_processor.reset_set_stats()
+
         with ctx.video_processor.lock:
             rep_count = ctx.video_processor.rep_count
             bad_rep_count = ctx.video_processor.bad_rep_count
             phase = ctx.video_processor.squat_phase
             feedback = ctx.video_processor.last_feedback
+            analytics = ctx.video_processor.get_analytics()
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Reps", rep_count)
         c2.metric("No-Reps", bad_rep_count)
         c3.metric("Phase", phase)
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Form Score", f"{analytics['form_score']:.0f}/100")
+        c5.metric("Rep Pace", f"{analytics['reps_per_min']:.1f} rpm")
+        c6.metric("Avg Depth", (f"{analytics['avg_depth']:.1f} deg" if analytics["avg_depth"] > 0 else "n/a"))
+        st.progress(int(analytics["form_score"]) / 100.0)
         st.caption(f"Feedback: {feedback}")
 
     if ctx.video_processor and st.button("📸 Take Snapshot"):
