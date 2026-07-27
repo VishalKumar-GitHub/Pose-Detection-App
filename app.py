@@ -2,16 +2,19 @@ import io
 import os
 import streamlit as st
 import numpy as np
+import mediapipe as mp
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 import threading
 import urllib.request
 
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
 # Import mediapipe components with error handling
 try:
     from mediapipe.tasks import python
     from mediapipe.tasks.python import vision
-    print("✓ MediaPipe imported successfully")
 except ImportError as e:
     print(f"✗ Error importing mediapipe: {e}")
     st.error(f"❌ Failed to import MediaPipe: {str(e)}\n\nPlease check if mediapipe is properly installed on the system.")
@@ -19,7 +22,6 @@ except ImportError as e:
 
 try:
     import av
-    print("✓ PyAV imported successfully")
 except ImportError as e:
     print(f"✗ Error importing av: {e}")
     st.error(f"❌ Failed to import PyAV: {str(e)}")
@@ -27,7 +29,6 @@ except ImportError as e:
 
 try:
     from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-    print("✓ streamlit-webrtc imported successfully")
 except ImportError as e:
     print(f"✗ Error importing streamlit_webrtc: {e}")
     st.error(f"❌ Failed to import streamlit-webrtc: {str(e)}")
@@ -108,6 +109,10 @@ line_color = st.sidebar.color_picker("Line Color", "#FF5733")
 width = st.sidebar.slider("Width", 300, 1920, 640)
 height = st.sidebar.slider("Height", 300, 1080, 480)
 
+st.sidebar.subheader("Workout Coach")
+workout_mode = st.sidebar.selectbox("Exercise Mode", ["Off", "Squat Counter"])
+show_debug_logs = st.sidebar.checkbox("Show Debug Logs", value=False)
+
 
 def hex_to_rgb(hex_color):
     return tuple(int(hex_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
@@ -122,6 +127,8 @@ def build_cfg():
         "line_thickness": line_thickness,
         "circle_rgb": hex_to_rgb(circle_color),
         "line_rgb": hex_to_rgb(line_color),
+        "workout_mode": workout_mode,
+        "debug_logs": show_debug_logs,
     }
 
 
@@ -156,6 +163,53 @@ def analyze_pose(landmarks):
     info["Back"] = "straight posture" if abs(l_sh[0] - l_hip[0]) < 0.05 else "bent posture"
 
     return info
+
+
+def get_landmark_xy(landmarks, index):
+    if index < len(landmarks):
+        return np.array([landmarks[index].x, landmarks[index].y], dtype=float)
+    return np.array([0.0, 0.0], dtype=float)
+
+
+def get_squat_metrics(landmarks):
+    lm = PoseLandmark
+    l_sh = get_landmark_xy(landmarks, lm.LEFT_SHOULDER)
+    r_sh = get_landmark_xy(landmarks, lm.RIGHT_SHOULDER)
+    l_hip = get_landmark_xy(landmarks, lm.LEFT_HIP)
+    r_hip = get_landmark_xy(landmarks, lm.RIGHT_HIP)
+    l_knee = get_landmark_xy(landmarks, lm.LEFT_KNEE)
+    r_knee = get_landmark_xy(landmarks, lm.RIGHT_KNEE)
+    l_ankle = get_landmark_xy(landmarks, lm.LEFT_ANKLE)
+    r_ankle = get_landmark_xy(landmarks, lm.RIGHT_ANKLE)
+
+    left_knee_angle = calc_angle(l_hip, l_knee, l_ankle)
+    right_knee_angle = calc_angle(r_hip, r_knee, r_ankle)
+    avg_knee_angle = float((left_knee_angle + right_knee_angle) / 2.0)
+
+    left_torso_angle = calc_angle(l_sh, l_hip, l_knee)
+    right_torso_angle = calc_angle(r_sh, r_hip, r_knee)
+    avg_torso_angle = float((left_torso_angle + right_torso_angle) / 2.0)
+
+    ankle_dist = abs(l_ankle[0] - r_ankle[0]) + 1e-6
+    knee_dist = abs(l_knee[0] - r_knee[0])
+    knee_to_ankle_ratio = float(knee_dist / ankle_dist)
+
+    return {
+        "avg_knee_angle": avg_knee_angle,
+        "avg_torso_angle": avg_torso_angle,
+        "knee_to_ankle_ratio": knee_to_ankle_ratio,
+    }
+
+
+def get_squat_warnings(metrics):
+    warnings = []
+    if metrics["avg_knee_angle"] > 105:
+        warnings.append("Go deeper")
+    if metrics["knee_to_ankle_ratio"] < 0.75:
+        warnings.append("Push knees out")
+    if metrics["avg_torso_angle"] < 125:
+        warnings.append("Chest up")
+    return warnings
 
 
 def get_font(size):
@@ -235,6 +289,16 @@ def draw_and_analyze(frame, landmarks, cfg):
     return frame
 
 
+def draw_and_analyze_with_extra(frame, landmarks, cfg, extra_info):
+    if landmarks:
+        frame = draw_landmarks_pil(frame, landmarks, cfg)
+        info = analyze_pose(landmarks)
+        if extra_info:
+            info.update(extra_info)
+        frame = draw_text_overlay(frame, info, cfg)
+    return frame
+
+
 def process_static(img, landmarks, cfg):
     pil = Image.fromarray(img)
     pil = pil.resize((width, height), Image.Resampling.LANCZOS)
@@ -244,18 +308,18 @@ def process_static(img, landmarks, cfg):
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
-@st.cache_resource
 def get_pose_landmarker():
-    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker.tflite")
+    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_full.task")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
     if not os.path.exists(model_path):
-        st.info("📥 Downloading pose detection model (50MB)...")
+        print("[INFO] Downloading pose detection model...")
         
         # Multiple model variants with fallback options
         urls = [
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float32/pose_landmarker_full.tflite",
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float32/pose_landmarker_heavy.tflite",
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
         ]
         
         downloaded = False
@@ -263,13 +327,16 @@ def get_pose_landmarker():
         
         for url in urls:
             try:
-                print(f"Attempting to download from: {url}")
-                with st.spinner(f"Downloading from {url.split('/')[-1]}..."):
-                    urllib.request.urlretrieve(url, model_path, timeout=60)
+                if build_cfg().get("debug_logs"):
+                    print(f"Attempting to download from: {url}")
+                # urlretrieve has no timeout parameter; use urlopen for timeout support.
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    with open(model_path, "wb") as out_file:
+                        out_file.write(response.read())
+                if build_cfg().get("debug_logs"):
                     print(f"✓ Successfully downloaded model from {url}")
-                    downloaded = True
-                    st.success("✓ Model downloaded successfully!")
-                    break
+                downloaded = True
+                break
             except urllib.error.HTTPError as e:
                 last_error = f"HTTP {e.code}: {e.reason}"
                 print(f"✗ HTTP Error from {url}: {last_error}")
@@ -283,7 +350,6 @@ def get_pose_landmarker():
         if not downloaded:
             error_msg = f"Failed to download model. Last error: {last_error}"
             print(f"✗ {error_msg}")
-            st.error(f"❌ {error_msg}\n\nTroubleshooting:\n- Check internet connection\n- Try reloading the page\n- Check firewall/proxy settings")
             return None
     
     try:
@@ -293,7 +359,6 @@ def get_pose_landmarker():
         print("✓ PoseLandmarker initialized successfully")
         return landmarker
     except Exception as e:
-        st.error(f"❌ Failed to initialize pose landmarker: {str(e)}")
         print(f"✗ Initialization error: {str(e)}")
         return None
 
@@ -305,45 +370,101 @@ class PoseProcessor(VideoProcessorBase):
         self.cfg = build_cfg()
         self.lock = threading.Lock()
         self.snapshot = None
+        self.rep_count = 0
+        self.bad_rep_count = 0
+        self.squat_phase = "up"
+        self.rep_depth_hit = False
+        self.rep_flags = set()
+        self.last_feedback = "Ready"
+
+    def update_squat_state(self, landmarks):
+        metrics = get_squat_metrics(landmarks)
+        warnings = get_squat_warnings(metrics)
+        knee_angle = metrics["avg_knee_angle"]
+
+        if self.squat_phase == "up" and knee_angle < 125:
+            self.squat_phase = "down"
+            self.rep_depth_hit = False
+            self.rep_flags = set()
+
+        if self.squat_phase == "down":
+            if knee_angle < 95:
+                self.rep_depth_hit = True
+            for warning in warnings:
+                self.rep_flags.add(warning)
+
+            if knee_angle > 155:
+                reasons = []
+                if not self.rep_depth_hit or "Go deeper" in self.rep_flags:
+                    reasons.append("depth too shallow")
+                if "Push knees out" in self.rep_flags:
+                    reasons.append("knees caving in")
+                if "Chest up" in self.rep_flags:
+                    reasons.append("excessive forward lean")
+
+                if reasons:
+                    self.bad_rep_count += 1
+                    self.last_feedback = "No rep: " + ", ".join(reasons)
+                else:
+                    self.rep_count += 1
+                    self.last_feedback = "Good rep"
+
+                self.squat_phase = "up"
+                self.rep_depth_hit = False
+                self.rep_flags = set()
+
+        warning_text = "none" if not warnings else ", ".join(warnings)
+        return {
+            "Exercise": "Squat Counter",
+            "Reps": str(self.rep_count),
+            "No-Reps": str(self.bad_rep_count),
+            "Phase": self.squat_phase,
+            "Knee Angle": f"{knee_angle:.1f}",
+            "Form Warnings": warning_text,
+            "Rep Feedback": self.last_feedback,
+        }
 
     def recv(self, frame):
         img = frame.to_ndarray(format="rgb24")
-        
+
+        # Ensure image is correct format for MediaPipe and PIL.
+        if img.dtype != np.uint8:
+            img = (img * 255).astype(np.uint8)
+
+        with self.lock:
+            cfg = self.cfg
+
+        out = img
         if self.pose_landmarker:
             try:
-                # Ensure image is correct format
-                if img.dtype != np.uint8:
-                    img = (img * 255).astype(np.uint8)
-                
-                # Create MediaPipe Image
-                mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=img)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
                 detection_result = self.pose_landmarker.detect(mp_image)
-                
-                with self.lock:
-                    cfg = self.cfg
-                
-                # Debug: Log detection info
-                num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
-                print(f"[DEBUG] Detections found: {num_detections}, Image shape: {img.shape}")
-                
+
+                if cfg.get("debug_logs"):
+                    num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
+                    print(f"[DEBUG] Detections found: {num_detections}, Image shape: {img.shape}")
+
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                     landmarks = detection_result.pose_landmarks[0]
-                    print(f"[DEBUG] First detection has {len(landmarks)} landmarks")
-                    if len(landmarks) > 0:
-                        print(f"[DEBUG] First landmark: x={landmarks[0].x:.3f}, y={landmarks[0].y:.3f}, presence={landmarks[0].presence:.3f}")
-                    
-                    img = draw_and_analyze(img, landmarks, cfg)
-                else:
-                    print(f"[DEBUG] No pose detected in frame")
-                
-                with self.lock:
-                    self.snapshot = img.copy()
+                    if cfg.get("debug_logs"):
+                        print(f"[DEBUG] First detection has {len(landmarks)} landmarks")
+
+                    if cfg.get("workout_mode") == "Squat Counter":
+                        extra_info = self.update_squat_state(landmarks)
+                        out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
+                    else:
+                        out = draw_and_analyze(img, landmarks, cfg)
+                elif cfg.get("debug_logs"):
+                    print("[DEBUG] No pose detected in frame")
             except Exception as e:
-                print(f"[ERROR] Pose detection error: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        return av.VideoFrame.from_ndarray(img, format="rgb24")
+                if cfg.get("debug_logs"):
+                    print(f"[ERROR] Pose detection error: {e}")
+
+        # Always keep the most recent frame so snapshot works even without a pose.
+        with self.lock:
+            self.snapshot = out.copy()
+
+        return av.VideoFrame.from_ndarray(out, format="rgb24")
 
 
 RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -368,6 +489,19 @@ if input_type == "Live Camera":
         with ctx.video_processor.lock:
             ctx.video_processor.cfg = build_cfg()
 
+    if ctx.video_processor and workout_mode == "Squat Counter":
+        with ctx.video_processor.lock:
+            rep_count = ctx.video_processor.rep_count
+            bad_rep_count = ctx.video_processor.bad_rep_count
+            phase = ctx.video_processor.squat_phase
+            feedback = ctx.video_processor.last_feedback
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Reps", rep_count)
+        c2.metric("No-Reps", bad_rep_count)
+        c3.metric("Phase", phase)
+        st.caption(f"Feedback: {feedback}")
+
     if ctx.video_processor and st.button("📸 Take Snapshot"):
         with ctx.video_processor.lock:
             snap = ctx.video_processor.snapshot
@@ -390,11 +524,12 @@ elif input_type == "Upload Image":
         
         if pose_landmarker:
             try:
-                mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=image)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
                 detection_result = pose_landmarker.detect(mp_image)
                 
-                num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
-                print(f"[DEBUG] Image upload - Detections: {num_detections}")
+                if build_cfg().get("debug_logs"):
+                    num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
+                    print(f"[DEBUG] Image upload - Detections: {num_detections}")
                 
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                     st.success(f"✓ Pose detected! Found {len(detection_result.pose_landmarks)} person(s)")
@@ -404,7 +539,8 @@ elif input_type == "Upload Image":
                     out = image
             except Exception as e:
                 st.error(f"❌ Detection error: {e}")
-                print(f"[ERROR] Image upload detection: {e}")
+                if build_cfg().get("debug_logs"):
+                    print(f"[ERROR] Image upload detection: {e}")
                 out = image
         else:
             st.error("❌ Failed to load pose detection model")
@@ -434,7 +570,7 @@ elif input_type == "Upload Video":
                     for frame in packet.decode():
                         img = frame.to_ndarray(format="rgb24")
                         try:
-                            mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=img)
+                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
                             detection_result = pose_landmarker.detect(mp_image)
                             
                             if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
@@ -442,7 +578,8 @@ elif input_type == "Upload Video":
                             else:
                                 out = img
                         except Exception as e:
-                            print(f"Frame detection error: {e}")
+                            if build_cfg().get("debug_logs"):
+                                print(f"Frame detection error: {e}")
                             out = img
                         
                         stframe.image(out, channels="RGB")
