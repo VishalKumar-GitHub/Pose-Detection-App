@@ -114,6 +114,12 @@ st.sidebar.subheader("Workout Coach")
 workout_mode = st.sidebar.selectbox("Exercise Mode", ["Off", "Squat Counter"])
 show_debug_logs = st.sidebar.checkbox("Show Debug Logs", value=False)
 
+st.sidebar.subheader("Detection Tuning")
+det_conf = st.sidebar.slider("Detection Confidence", 0.1, 0.9, 0.35, 0.05)
+presence_conf = st.sidebar.slider("Presence Confidence", 0.1, 0.9, 0.30, 0.05)
+track_conf = st.sidebar.slider("Tracking Confidence", 0.1, 0.9, 0.30, 0.05)
+landmark_presence_draw = st.sidebar.slider("Landmark Draw Threshold", 0.0, 0.9, 0.20, 0.05)
+
 
 def hex_to_rgb(hex_color):
     return tuple(int(hex_color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
@@ -130,6 +136,10 @@ def build_cfg():
         "line_rgb": hex_to_rgb(line_color),
         "workout_mode": workout_mode,
         "debug_logs": show_debug_logs,
+        "det_conf": det_conf,
+        "presence_conf": presence_conf,
+        "track_conf": track_conf,
+        "landmark_presence_draw": landmark_presence_draw,
     }
 
 
@@ -247,9 +257,9 @@ def draw_landmarks_pil(frame, landmarks, cfg):
             end = landmarks[connection[1]]
             
             # Skip if confidence is too low (threshold: 0.3 instead of 0.5)
-            if hasattr(start, 'presence') and start.presence < 0.3:
+            if hasattr(start, 'presence') and start.presence < cfg.get("landmark_presence_draw", 0.2):
                 continue
-            if hasattr(end, 'presence') and end.presence < 0.3:
+            if hasattr(end, 'presence') and end.presence < cfg.get("landmark_presence_draw", 0.2):
                 continue
             
             x1, y1 = int(start.x * width), int(start.y * height)
@@ -264,7 +274,7 @@ def draw_landmarks_pil(frame, landmarks, cfg):
     # Draw circles for landmarks (with lower confidence threshold)
     for landmark in landmarks:
         # Skip if confidence is too low
-        if hasattr(landmark, 'presence') and landmark.presence < 0.3:
+        if hasattr(landmark, 'presence') and landmark.presence < cfg.get("landmark_presence_draw", 0.2):
             continue
         
         x, y = int(landmark.x * width), int(landmark.y * height)
@@ -309,7 +319,7 @@ def process_static(img, landmarks, cfg):
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
-def get_pose_landmarker():
+def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30):
     model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_full.task")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
@@ -355,7 +365,15 @@ def get_pose_landmarker():
     
     try:
         base_options = python.BaseOptions(model_asset_path=model_path)
-        options = vision.PoseLandmarkerOptions(base_options=base_options)
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.IMAGE,
+            num_poses=1,
+            min_pose_detection_confidence=float(det_conf),
+            min_pose_presence_confidence=float(presence_conf),
+            min_tracking_confidence=float(track_conf),
+            output_segmentation_masks=False,
+        )
         landmarker = vision.PoseLandmarker.create_from_options(options)
         print("✓ PoseLandmarker initialized successfully")
         return landmarker
@@ -367,8 +385,12 @@ def get_pose_landmarker():
 # ---------- Live camera processor ----------
 class PoseProcessor(VideoProcessorBase):
     def __init__(self):
-        self.pose_landmarker = get_pose_landmarker()
         self.cfg = build_cfg()
+        self.pose_landmarker = get_pose_landmarker(
+            self.cfg.get("det_conf", 0.35),
+            self.cfg.get("presence_conf", 0.30),
+            self.cfg.get("track_conf", 0.30),
+        )
         self.lock = threading.Lock()
         self.snapshot = None
         self.rep_count = 0
@@ -606,7 +628,12 @@ elif input_type == "Upload Image":
         image = np.array(Image.open(file).convert("RGB"))
         st.info(f"📊 Image shape: {image.shape}, dtype: {image.dtype}")
         
-        pose_landmarker = get_pose_landmarker()
+        cfg = build_cfg()
+        pose_landmarker = get_pose_landmarker(
+            cfg.get("det_conf", 0.35),
+            cfg.get("presence_conf", 0.30),
+            cfg.get("track_conf", 0.30),
+        )
         
         if pose_landmarker:
             try:
@@ -649,7 +676,11 @@ elif input_type == "Upload Video":
             container = av.open(tfile.name)
             stframe = st.empty()
             cfg = build_cfg()
-            pose_landmarker = get_pose_landmarker()
+            pose_landmarker = get_pose_landmarker(
+                cfg.get("det_conf", 0.35),
+                cfg.get("presence_conf", 0.30),
+                cfg.get("track_conf", 0.30),
+            )
             
             if pose_landmarker:
                 for packet in container.demux(video=0):
