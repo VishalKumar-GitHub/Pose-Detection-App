@@ -1,5 +1,6 @@
 import io
 import os
+import hmac
 import streamlit as st
 import numpy as np
 import mediapipe as mp
@@ -42,6 +43,40 @@ except ImportError as e:
 
 # ---------- Page config ----------
 st.set_page_config(page_title="Pose Detection & Analysis", layout="wide")
+
+
+def get_secret_value(name):
+    try:
+        value = st.secrets.get(name, "")
+    except Exception:
+        value = ""
+    return str(value).strip() if value is not None else ""
+
+
+def require_app_access():
+    # Optional gate: only active when APP_ACCESS_KEY is configured.
+    expected = get_secret_value("APP_ACCESS_KEY") or os.getenv("APP_ACCESS_KEY", "").strip()
+    if not expected:
+        return
+
+    if "auth_ok" not in st.session_state:
+        st.session_state.auth_ok = False
+
+    if st.session_state.auth_ok:
+        return
+
+    st.title("Private App Access")
+    st.write("Enter access key to continue.")
+    entered = st.text_input("Access key", type="password")
+    if st.button("Unlock"):
+        st.session_state.auth_ok = hmac.compare_digest(entered, expected)
+        if st.session_state.auth_ok:
+            st.rerun()
+        st.error("Invalid access key")
+    st.stop()
+
+
+require_app_access()
 
 # ---------- Page background ----------
 page_bg_css = """

@@ -60,6 +60,21 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Optional: keep app/API secrets private
+
+1. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`.
+2. Put your real secret values in `.streamlit/secrets.toml`.
+3. Keep `.streamlit/secrets.toml` out of Git (already ignored).
+
+Example:
+
+```toml
+APP_ACCESS_KEY = "your-private-access-key"
+# OPENAI_API_KEY = "your-real-api-key"
+```
+
+If `APP_ACCESS_KEY` is set, the app asks for the key before anyone can use it.
+
 The app opens at `http://localhost:8501`. Live camera works locally because `localhost` is treated as a secure origin.
 
 ---
@@ -70,11 +85,17 @@ The app opens at `http://localhost:8501`. Live camera works locally because `loc
 2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
 3. Click **New app**, select your repo, branch `main`, and main file `app.py`.
 4. Click **Deploy**.
+5. In app settings, open **Secrets** and add values like:
+
+```toml
+APP_ACCESS_KEY = "your-private-access-key"
+# OPENAI_API_KEY = "your-real-api-key"
+```
 
 The repo includes:
 - `requirements.txt` — Python dependencies
-- `packages.txt` — no system libraries are required for this app
-- `runtime.txt` — pins Python 3.14 for Streamlit Cloud compatibility
+- `packages.txt` — system libraries for cloud runtime
+- `runtime.txt` — pins Python 3.11
 
 Live camera works on the deployed app because Streamlit Cloud serves over HTTPS and WebRTC captures the webcam in the browser.
 
