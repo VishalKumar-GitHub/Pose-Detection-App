@@ -310,6 +310,13 @@ def draw_and_analyze_with_extra(frame, landmarks, cfg, extra_info):
     return frame
 
 
+def detect_with_fallback(fallback_pose, image_rgb):
+    result = fallback_pose.process(image_rgb)
+    if result and result.pose_landmarks:
+        return result.pose_landmarks.landmark
+    return None
+
+
 def process_static(img, landmarks, cfg):
     pil = Image.fromarray(img)
     pil = pil.resize((width, height), Image.Resampling.LANCZOS)
@@ -532,40 +539,28 @@ class PoseProcessor(VideoProcessorBase):
             cfg = self.cfg
 
         out = img
-        if self.pose_landmarker:
-            try:
+        landmarks = None
+        try:
+            if self.pose_landmarker:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
                 detection_result = self.pose_landmarker.detect(mp_image)
-
-                if cfg.get("debug_logs"):
-                    num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
-                    print(f"[DEBUG] Detections found: {num_detections}, Image shape: {img.shape}")
-
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                     landmarks = detection_result.pose_landmarks[0]
-                    if cfg.get("debug_logs"):
-                        print(f"[DEBUG] First detection has {len(landmarks)} landmarks")
 
-                    if cfg.get("workout_mode") == "Squat Counter":
-                        extra_info = self.update_squat_state(landmarks)
-                        out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
-                    else:
-                        out = draw_and_analyze(img, landmarks, cfg)
+            if landmarks is None:
+                landmarks = detect_with_fallback(self.pose_fallback, img)
+
+            if landmarks is not None:
+                if cfg.get("workout_mode") == "Squat Counter":
+                    extra_info = self.update_squat_state(landmarks)
+                    out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
                 else:
-                    # Fallback: Solutions Pose often locks faster on live camera.
-                    fb_result = self.pose_fallback.process(img)
-                    if fb_result.pose_landmarks:
-                        landmarks = fb_result.pose_landmarks.landmark
-                        if cfg.get("workout_mode") == "Squat Counter":
-                            extra_info = self.update_squat_state(landmarks)
-                            out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
-                        else:
-                            out = draw_and_analyze(img, landmarks, cfg)
-                    elif cfg.get("debug_logs"):
-                        print("[DEBUG] No pose detected in frame")
-            except Exception as e:
-                if cfg.get("debug_logs"):
-                    print(f"[ERROR] Pose detection error: {e}")
+                    out = draw_and_analyze(img, landmarks, cfg)
+            elif cfg.get("debug_logs"):
+                print("[DEBUG] No pose detected in frame")
+        except Exception as e:
+            if cfg.get("debug_logs"):
+                print(f"[ERROR] Pose detection error: {e}")
 
         # Always keep the most recent frame so snapshot works even without a pose.
         with self.lock:
@@ -653,29 +648,38 @@ elif input_type == "Upload Image":
             cfg.get("track_conf", 0.30),
         )
         
-        if pose_landmarker:
-            try:
+        fallback_pose = mp.solutions.pose.Pose(
+            static_image_mode=True,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=cfg.get("det_conf", 0.35),
+            min_tracking_confidence=cfg.get("track_conf", 0.30),
+        )
+
+        try:
+            landmarks = None
+            if pose_landmarker:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
                 detection_result = pose_landmarker.detect(mp_image)
-                
-                if build_cfg().get("debug_logs"):
-                    num_detections = len(detection_result.pose_landmarks) if detection_result.pose_landmarks else 0
-                    print(f"[DEBUG] Image upload - Detections: {num_detections}")
-                
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                    st.success(f"✓ Pose detected! Found {len(detection_result.pose_landmarks)} person(s)")
-                    out = process_static(image, detection_result.pose_landmarks[0], build_cfg())
-                else:
-                    st.warning("❌ No pose detected in the image. Try a clearer photo with a visible person.")
-                    out = image
-            except Exception as e:
-                st.error(f"❌ Detection error: {e}")
-                if build_cfg().get("debug_logs"):
-                    print(f"[ERROR] Image upload detection: {e}")
+                    landmarks = detection_result.pose_landmarks[0]
+
+            if landmarks is None:
+                landmarks = detect_with_fallback(fallback_pose, image)
+
+            if landmarks is not None:
+                st.success("✓ Pose detected")
+                out = process_static(image, landmarks, cfg)
+            else:
+                st.warning("❌ No pose detected in the image. Try a clearer photo with your full body visible.")
                 out = image
-        else:
-            st.error("❌ Failed to load pose detection model")
+        except Exception as e:
+            st.error(f"❌ Detection error: {e}")
+            if cfg.get("debug_logs"):
+                print(f"[ERROR] Image upload detection: {e}")
             out = image
+        finally:
+            fallback_pose.close()
         
         st.image(out, channels="RGB")
         buffer = io.BytesIO()
@@ -699,25 +703,39 @@ elif input_type == "Upload Video":
                 cfg.get("presence_conf", 0.30),
                 cfg.get("track_conf", 0.30),
             )
+            fallback_pose = mp.solutions.pose.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                enable_segmentation=False,
+                min_detection_confidence=cfg.get("det_conf", 0.35),
+                min_tracking_confidence=cfg.get("track_conf", 0.30),
+            )
             
-            if pose_landmarker:
-                for packet in container.demux(video=0):
-                    for frame in packet.decode():
-                        img = frame.to_ndarray(format="rgb24")
-                        try:
+            for packet in container.demux(video=0):
+                for frame in packet.decode():
+                    img = frame.to_ndarray(format="rgb24")
+                    try:
+                        landmarks = None
+                        if pose_landmarker:
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
                             detection_result = pose_landmarker.detect(mp_image)
-                            
                             if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                                out = process_static(img, detection_result.pose_landmarks[0], cfg)
-                            else:
-                                out = img
-                        except Exception as e:
-                            if build_cfg().get("debug_logs"):
-                                print(f"Frame detection error: {e}")
+                                landmarks = detection_result.pose_landmarks[0]
+
+                        if landmarks is None:
+                            landmarks = detect_with_fallback(fallback_pose, img)
+
+                        if landmarks is not None:
+                            out = process_static(img, landmarks, cfg)
+                        else:
                             out = img
-                        
-                        stframe.image(out, channels="RGB")
+                    except Exception as e:
+                        if cfg.get("debug_logs"):
+                            print(f"Frame detection error: {e}")
+                        out = img
+
+                    stframe.image(out, channels="RGB")
+            fallback_pose.close()
             container.close()
         finally:
             os.unlink(tfile.name)
