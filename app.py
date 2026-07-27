@@ -22,6 +22,11 @@ except ImportError as e:
     st.stop()
 
 try:
+    from mediapipe.python.solutions import pose as mp_pose_solution
+except Exception:
+    mp_pose_solution = None
+
+try:
     import av
 except ImportError as e:
     print(f"✗ Error importing av: {e}")
@@ -311,6 +316,8 @@ def draw_and_analyze_with_extra(frame, landmarks, cfg, extra_info):
 
 
 def detect_with_fallback(fallback_pose, image_rgb):
+    if fallback_pose is None:
+        return None
     result = fallback_pose.process(image_rgb)
     if result and result.pose_landmarks:
         return result.pose_landmarks.landmark
@@ -371,7 +378,10 @@ def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30):
             return None
     
     try:
-        base_options = python.BaseOptions(model_asset_path=model_path)
+        base_options = python.BaseOptions(
+            model_asset_path=model_path,
+            delegate=python.BaseOptions.Delegate.CPU,
+        )
         options = vision.PoseLandmarkerOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
@@ -399,13 +409,15 @@ class PoseProcessor(VideoProcessorBase):
             self.cfg.get("track_conf", 0.30),
         )
         # Fallback detector is more tolerant on noisy webcam streams.
-        self.pose_fallback = mp.solutions.pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            enable_segmentation=False,
-            min_detection_confidence=self.cfg.get("det_conf", 0.35),
-            min_tracking_confidence=self.cfg.get("track_conf", 0.30),
-        )
+        self.pose_fallback = None
+        if mp_pose_solution is not None:
+            self.pose_fallback = mp_pose_solution.Pose(
+                static_image_mode=False,
+                model_complexity=1,
+                enable_segmentation=False,
+                min_detection_confidence=self.cfg.get("det_conf", 0.35),
+                min_tracking_confidence=self.cfg.get("track_conf", 0.30),
+            )
         self.lock = threading.Lock()
         self.snapshot = None
         self.rep_count = 0
@@ -648,13 +660,15 @@ elif input_type == "Upload Image":
             cfg.get("track_conf", 0.30),
         )
         
-        fallback_pose = mp.solutions.pose.Pose(
-            static_image_mode=True,
-            model_complexity=1,
-            enable_segmentation=False,
-            min_detection_confidence=cfg.get("det_conf", 0.35),
-            min_tracking_confidence=cfg.get("track_conf", 0.30),
-        )
+        fallback_pose = None
+        if mp_pose_solution is not None:
+            fallback_pose = mp_pose_solution.Pose(
+                static_image_mode=True,
+                model_complexity=1,
+                enable_segmentation=False,
+                min_detection_confidence=cfg.get("det_conf", 0.35),
+                min_tracking_confidence=cfg.get("track_conf", 0.30),
+            )
 
         try:
             landmarks = None
@@ -679,7 +693,8 @@ elif input_type == "Upload Image":
                 print(f"[ERROR] Image upload detection: {e}")
             out = image
         finally:
-            fallback_pose.close()
+            if fallback_pose is not None:
+                fallback_pose.close()
         
         st.image(out, channels="RGB")
         buffer = io.BytesIO()
@@ -703,13 +718,15 @@ elif input_type == "Upload Video":
                 cfg.get("presence_conf", 0.30),
                 cfg.get("track_conf", 0.30),
             )
-            fallback_pose = mp.solutions.pose.Pose(
-                static_image_mode=False,
-                model_complexity=1,
-                enable_segmentation=False,
-                min_detection_confidence=cfg.get("det_conf", 0.35),
-                min_tracking_confidence=cfg.get("track_conf", 0.30),
-            )
+            fallback_pose = None
+            if mp_pose_solution is not None:
+                fallback_pose = mp_pose_solution.Pose(
+                    static_image_mode=False,
+                    model_complexity=1,
+                    enable_segmentation=False,
+                    min_detection_confidence=cfg.get("det_conf", 0.35),
+                    min_tracking_confidence=cfg.get("track_conf", 0.30),
+                )
             
             for packet in container.demux(video=0):
                 for frame in packet.decode():
@@ -735,7 +752,8 @@ elif input_type == "Upload Video":
                         out = img
 
                     stframe.image(out, channels="RGB")
-            fallback_pose.close()
+            if fallback_pose is not None:
+                fallback_pose.close()
             container.close()
         finally:
             os.unlink(tfile.name)
