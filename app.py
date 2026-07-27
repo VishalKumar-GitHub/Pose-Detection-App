@@ -214,7 +214,7 @@ def get_squat_metrics(landmarks):
 
 def get_squat_warnings(metrics):
     warnings = []
-    if metrics["avg_knee_angle"] > 105:
+    if metrics["avg_knee_angle"] > 120:
         warnings.append("Go deeper")
     if metrics["knee_to_ankle_ratio"] < 0.75:
         warnings.append("Push knees out")
@@ -391,6 +391,14 @@ class PoseProcessor(VideoProcessorBase):
             self.cfg.get("presence_conf", 0.30),
             self.cfg.get("track_conf", 0.30),
         )
+        # Fallback detector is more tolerant on noisy webcam streams.
+        self.pose_fallback = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            enable_segmentation=False,
+            min_detection_confidence=self.cfg.get("det_conf", 0.35),
+            min_tracking_confidence=self.cfg.get("track_conf", 0.30),
+        )
         self.lock = threading.Lock()
         self.snapshot = None
         self.rep_count = 0
@@ -461,7 +469,7 @@ class PoseProcessor(VideoProcessorBase):
                 "Rep Feedback": "Set paused",
             }
 
-        if self.squat_phase == "up" and knee_angle < 125:
+        if self.squat_phase == "up" and knee_angle < 140:
             self.squat_phase = "down"
             self.rep_depth_hit = False
             self.rep_flags = set()
@@ -469,12 +477,12 @@ class PoseProcessor(VideoProcessorBase):
 
         if self.squat_phase == "down":
             self.current_rep_min_knee = min(self.current_rep_min_knee, knee_angle)
-            if knee_angle < 95:
+            if knee_angle < 120:
                 self.rep_depth_hit = True
             for warning in warnings:
                 self.rep_flags.add(warning)
 
-            if knee_angle > 155:
+            if knee_angle > 150:
                 reasons = []
                 if not self.rep_depth_hit or "Go deeper" in self.rep_flags:
                     reasons.append("depth too shallow")
@@ -543,8 +551,18 @@ class PoseProcessor(VideoProcessorBase):
                         out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
                     else:
                         out = draw_and_analyze(img, landmarks, cfg)
-                elif cfg.get("debug_logs"):
-                    print("[DEBUG] No pose detected in frame")
+                else:
+                    # Fallback: Solutions Pose often locks faster on live camera.
+                    fb_result = self.pose_fallback.process(img)
+                    if fb_result.pose_landmarks:
+                        landmarks = fb_result.pose_landmarks.landmark
+                        if cfg.get("workout_mode") == "Squat Counter":
+                            extra_info = self.update_squat_state(landmarks)
+                            out = draw_and_analyze_with_extra(img, landmarks, cfg, extra_info)
+                        else:
+                            out = draw_and_analyze(img, landmarks, cfg)
+                    elif cfg.get("debug_logs"):
+                        print("[DEBUG] No pose detected in frame")
             except Exception as e:
                 if cfg.get("debug_logs"):
                     print(f"[ERROR] Pose detection error: {e}")
