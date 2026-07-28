@@ -402,29 +402,80 @@ def process_static(img, landmarks, cfg):
     return draw_and_analyze(rgb, landmarks, cfg)
 
 
+def build_image_candidates(image):
+    candidates = [image]
+
+    pil = Image.fromarray(image)
+    mirrored = np.array(pil.transpose(Image.Transpose.FLIP_LEFT_RIGHT))
+    candidates.append(mirrored)
+
+    enhanced = pil.convert("L")
+    enhanced = Image.eval(enhanced, lambda px: 255 if px > 180 else int(px * 1.25))
+    enhanced_rgb = np.array(enhanced.convert("RGB"))
+    candidates.append(enhanced_rgb)
+
+    enhanced_mirrored = np.array(Image.fromarray(enhanced_rgb).transpose(Image.Transpose.FLIP_LEFT_RIGHT))
+    candidates.append(enhanced_mirrored)
+
+    # Deduplicate candidates that may end up identical.
+    unique = []
+    seen = set()
+    for item in candidates:
+        key = hash(item.tobytes())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
 def detect_landmarks_from_image(image, cfg):
-    pose_landmarker = get_pose_landmarker(
-        cfg.get("det_conf", 0.35),
-        cfg.get("presence_conf", 0.30),
-        cfg.get("track_conf", 0.30),
-        "IMAGE",
-    )
+    det_levels = [
+        float(cfg.get("det_conf", 0.35)),
+        0.25,
+        0.15,
+    ]
+    presence_levels = [
+        float(cfg.get("presence_conf", 0.30)),
+        0.20,
+        0.10,
+    ]
+    det_levels = sorted(set(max(0.05, min(0.9, x)) for x in det_levels), reverse=True)
+    presence_levels = sorted(set(max(0.05, min(0.9, x)) for x in presence_levels), reverse=True)
 
-    fallback_pose = create_fallback_pose(static_image_mode=True, cfg=cfg)
-    try:
-        landmarks = None
-        if pose_landmarker:
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
-            detection_result = pose_landmarker.detect(mp_image)
-            if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                landmarks = detection_result.pose_landmarks[0]
+    candidates = build_image_candidates(image)
+    for det_conf_try in det_levels:
+        for presence_conf_try in presence_levels:
+            pose_landmarker = get_pose_landmarker(
+                det_conf_try,
+                presence_conf_try,
+                cfg.get("track_conf", 0.30),
+                "IMAGE",
+            )
+            fallback_cfg = dict(cfg)
+            fallback_cfg["det_conf"] = det_conf_try
+            fallback_cfg["track_conf"] = cfg.get("track_conf", 0.30)
+            fallback_pose = create_fallback_pose(static_image_mode=True, cfg=fallback_cfg)
 
-        if landmarks is None:
-            landmarks = detect_with_fallback(fallback_pose, image)
-        return landmarks
-    finally:
-        if fallback_pose is not None:
-            fallback_pose.close()
+            try:
+                for candidate in candidates:
+                    landmarks = None
+                    if pose_landmarker:
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=candidate)
+                        detection_result = pose_landmarker.detect(mp_image)
+                        if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                            landmarks = detection_result.pose_landmarks[0]
+
+                    if landmarks is None:
+                        landmarks = detect_with_fallback(fallback_pose, candidate)
+
+                    if landmarks is not None:
+                        return landmarks, candidate
+            finally:
+                if fallback_pose is not None:
+                    fallback_pose.close()
+
+    return None, image
 
 
 # ---------- Download and load pose landmarker model ----------
@@ -756,11 +807,11 @@ elif input_type == "Upload Image":
         
         cfg = build_cfg()
         try:
-            landmarks = detect_landmarks_from_image(image, cfg)
+            landmarks, used_image = detect_landmarks_from_image(image, cfg)
 
             if landmarks is not None:
                 st.success("✓ Pose detected")
-                out = process_static(image, landmarks, cfg)
+                out = process_static(used_image, landmarks, cfg)
             else:
                 st.warning("❌ No pose detected in the image. Try a clearer photo with your full body visible.")
                 out = image
@@ -783,10 +834,10 @@ elif input_type == "Camera Snapshot (Stable)":
         image = np.array(Image.open(shot).convert("RGB"))
         cfg = build_cfg()
         try:
-            landmarks = detect_landmarks_from_image(image, cfg)
+            landmarks, used_image = detect_landmarks_from_image(image, cfg)
             if landmarks is not None:
                 st.success("✓ Pose detected")
-                out = process_static(image, landmarks, cfg)
+                out = process_static(used_image, landmarks, cfg)
             else:
                 st.warning("❌ No pose detected in snapshot. Keep full body visible and improve lighting.")
                 out = image
