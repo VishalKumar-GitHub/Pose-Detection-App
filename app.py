@@ -5,7 +5,7 @@ import importlib
 import streamlit as st
 import numpy as np
 import mediapipe as mp
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import tempfile
 import threading
 import urllib.request
@@ -448,6 +448,16 @@ def build_image_candidates(image):
     enhanced_mirrored = np.array(Image.fromarray(enhanced_rgb).transpose(Image.Transpose.FLIP_LEFT_RIGHT))
     candidates.append(("enhanced_mirrored", enhanced_mirrored))
 
+    rot90 = np.array(Image.fromarray(image).transpose(Image.Transpose.ROTATE_90))
+    rot270 = np.array(Image.fromarray(image).transpose(Image.Transpose.ROTATE_270))
+    candidates.append(("rot90", rot90))
+    candidates.append(("rot270", rot270))
+
+    enhanced_rot90 = np.array(Image.fromarray(enhanced_rgb).transpose(Image.Transpose.ROTATE_90))
+    enhanced_rot270 = np.array(Image.fromarray(enhanced_rgb).transpose(Image.Transpose.ROTATE_270))
+    candidates.append(("enhanced_rot90", enhanced_rot90))
+    candidates.append(("enhanced_rot270", enhanced_rot270))
+
     # Deduplicate candidates that may end up identical.
     unique = []
     seen = set()
@@ -877,7 +887,7 @@ if input_type == "Live Camera":
 elif input_type == "Upload Image":
     file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
     if file:
-        image = np.array(Image.open(file).convert("RGB"))
+        image = np.array(ImageOps.exif_transpose(Image.open(file)).convert("RGB"))
         st.info(f"📊 Image shape: {image.shape}, dtype: {image.dtype}")
         
         cfg = build_cfg()
