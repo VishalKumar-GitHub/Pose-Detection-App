@@ -404,6 +404,19 @@ def process_static(img, landmarks, cfg):
     return draw_and_analyze(rgb, landmarks, cfg)
 
 
+def resize_for_detection(image, max_side=512):
+    h, w = image.shape[:2]
+    largest = max(h, w)
+    if largest <= max_side:
+        return image
+    scale = max_side / float(largest)
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    pil = Image.fromarray(image)
+    resized = pil.resize((new_w, new_h), Image.Resampling.BILINEAR)
+    return np.array(resized)
+
+
 def build_image_candidates(image):
     candidates = [("original", image)]
 
@@ -595,6 +608,9 @@ class PoseProcessor(VideoProcessorBase):
         self.pose_fallback = create_fallback_pose(static_image_mode=False, cfg=self.cfg)
         self.lock = threading.Lock()
         self.last_ts_ms = 0
+        self.frame_index = 0
+        self.detect_every_n = 2
+        self.last_landmarks = None
         self.snapshot = None
         self.rep_count = 0
         self.bad_rep_count = 0
@@ -725,22 +741,30 @@ class PoseProcessor(VideoProcessorBase):
 
         with self.lock:
             cfg = self.cfg
+            detect_every_n = self.detect_every_n
+
+        self.frame_index += 1
+        run_detection = (self.frame_index % detect_every_n) == 0
 
         out = img
-        landmarks = None
+        landmarks = self.last_landmarks if not run_detection else None
         try:
-            if self.pose_landmarker:
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-                ts_ms = int(time.time() * 1000)
-                if ts_ms <= self.last_ts_ms:
-                    ts_ms = self.last_ts_ms + 1
-                self.last_ts_ms = ts_ms
-                detection_result = self.pose_landmarker.detect_for_video(mp_image, ts_ms)
-                if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                    landmarks = detection_result.pose_landmarks[0]
+            if run_detection:
+                detect_img = resize_for_detection(img, max_side=512)
+                if self.pose_landmarker:
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=detect_img)
+                    ts_ms = int(time.time() * 1000)
+                    if ts_ms <= self.last_ts_ms:
+                        ts_ms = self.last_ts_ms + 1
+                    self.last_ts_ms = ts_ms
+                    detection_result = self.pose_landmarker.detect_for_video(mp_image, ts_ms)
+                    if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                        landmarks = detection_result.pose_landmarks[0]
 
-            if landmarks is None:
-                landmarks = detect_with_fallback(self.pose_fallback, img)
+                if landmarks is None:
+                    landmarks = detect_with_fallback(self.pose_fallback, detect_img)
+
+                self.last_landmarks = landmarks
 
             if landmarks is not None:
                 if cfg.get("workout_mode") == "Squat Counter":
@@ -915,22 +939,30 @@ elif input_type == "Upload Video":
             )
             fallback_pose = create_fallback_pose(static_image_mode=False, cfg=cfg)
             frame_idx = 0
+            last_landmarks = None
+            detect_every_n = 2
             
             for packet in container.demux(video=0):
                 for frame in packet.decode():
                     img = frame.to_ndarray(format="rgb24")
                     try:
-                        landmarks = None
-                        if pose_landmarker:
-                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-                            ts_ms = int((frame.time or (frame_idx / 30.0)) * 1000)
-                            frame_idx += 1
-                            detection_result = pose_landmarker.detect_for_video(mp_image, ts_ms)
-                            if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                                landmarks = detection_result.pose_landmarks[0]
+                        frame_idx += 1
+                        run_detection = (frame_idx % detect_every_n) == 0
+                        landmarks = last_landmarks if not run_detection else None
 
-                        if landmarks is None:
-                            landmarks = detect_with_fallback(fallback_pose, img)
+                        if run_detection:
+                            detect_img = resize_for_detection(img, max_side=512)
+                            if pose_landmarker:
+                                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=detect_img)
+                                ts_ms = int((frame.time or (frame_idx / 30.0)) * 1000)
+                                detection_result = pose_landmarker.detect_for_video(mp_image, ts_ms)
+                                if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                                    landmarks = detection_result.pose_landmarks[0]
+
+                            if landmarks is None:
+                                landmarks = detect_with_fallback(fallback_pose, detect_img)
+
+                            last_landmarks = landmarks
 
                         if landmarks is not None:
                             out = process_static(img, landmarks, cfg)
