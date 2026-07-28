@@ -188,6 +188,12 @@ det_conf = st.sidebar.slider("Detection Confidence", 0.1, 0.9, 0.35, 0.05)
 presence_conf = st.sidebar.slider("Presence Confidence", 0.1, 0.9, 0.30, 0.05)
 track_conf = st.sidebar.slider("Tracking Confidence", 0.1, 0.9, 0.30, 0.05)
 landmark_presence_draw = st.sidebar.slider("Landmark Draw Threshold", 0.0, 0.9, 0.20, 0.05)
+performance_mode = st.sidebar.selectbox(
+    "Performance Mode",
+    ["Eco", "Balanced", "High Accuracy"],
+    index=1,
+    help="Balanced is recommended for Streamlit Cloud.",
+)
 
 
 def hex_to_rgb(hex_color):
@@ -195,6 +201,13 @@ def hex_to_rgb(hex_color):
 
 
 def build_cfg():
+    mode_config = {
+        "Eco": {"detect_every_n": 3, "detect_max_side": 448},
+        "Balanced": {"detect_every_n": 2, "detect_max_side": 512},
+        "High Accuracy": {"detect_every_n": 1, "detect_max_side": 640},
+    }
+    perf = mode_config.get(performance_mode, mode_config["Balanced"])
+
     return {
         "text_size": text_size,
         "text_thickness": text_thickness,
@@ -206,6 +219,9 @@ def build_cfg():
         "workout_mode": workout_mode,
         "debug_logs": show_debug_logs,
         "show_detection_diagnostics": show_detection_diagnostics,
+        "performance_mode": performance_mode,
+        "detect_every_n": perf["detect_every_n"],
+        "detect_max_side": perf["detect_max_side"],
         "det_conf": det_conf,
         "presence_conf": presence_conf,
         "track_conf": track_conf,
@@ -609,7 +625,8 @@ class PoseProcessor(VideoProcessorBase):
         self.lock = threading.Lock()
         self.last_ts_ms = 0
         self.frame_index = 0
-        self.detect_every_n = 2
+        self.detect_every_n = max(1, int(self.cfg.get("detect_every_n", 2)))
+        self.detect_max_side = max(256, int(self.cfg.get("detect_max_side", 512)))
         self.last_landmarks = None
         self.snapshot = None
         self.rep_count = 0
@@ -741,7 +758,10 @@ class PoseProcessor(VideoProcessorBase):
 
         with self.lock:
             cfg = self.cfg
+            self.detect_every_n = max(1, int(cfg.get("detect_every_n", self.detect_every_n)))
+            self.detect_max_side = max(256, int(cfg.get("detect_max_side", self.detect_max_side)))
             detect_every_n = self.detect_every_n
+            detect_max_side = self.detect_max_side
 
         self.frame_index += 1
         run_detection = (self.frame_index % detect_every_n) == 0
@@ -750,7 +770,7 @@ class PoseProcessor(VideoProcessorBase):
         landmarks = self.last_landmarks if not run_detection else None
         try:
             if run_detection:
-                detect_img = resize_for_detection(img, max_side=512)
+                detect_img = resize_for_detection(img, max_side=detect_max_side)
                 if self.pose_landmarker:
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=detect_img)
                     ts_ms = int(time.time() * 1000)
@@ -940,7 +960,8 @@ elif input_type == "Upload Video":
             fallback_pose = create_fallback_pose(static_image_mode=False, cfg=cfg)
             frame_idx = 0
             last_landmarks = None
-            detect_every_n = 2
+            detect_every_n = max(1, int(cfg.get("detect_every_n", 2)))
+            detect_max_side = max(256, int(cfg.get("detect_max_side", 512)))
             
             for packet in container.demux(video=0):
                 for frame in packet.decode():
@@ -951,7 +972,7 @@ elif input_type == "Upload Video":
                         landmarks = last_landmarks if not run_detection else None
 
                         if run_detection:
-                            detect_img = resize_for_detection(img, max_side=512)
+                            detect_img = resize_for_detection(img, max_side=detect_max_side)
                             if pose_landmarker:
                                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=detect_img)
                                 ts_ms = int((frame.time or (frame_idx / 30.0)) * 1000)
