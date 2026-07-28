@@ -181,6 +181,7 @@ height = st.sidebar.slider("Height", 300, 1080, 480)
 st.sidebar.subheader("Workout Coach")
 workout_mode = st.sidebar.selectbox("Exercise Mode", ["Off", "Squat Counter"])
 show_debug_logs = st.sidebar.checkbox("Show Debug Logs", value=False)
+show_detection_diagnostics = st.sidebar.checkbox("Show Detection Diagnostics", value=True)
 
 st.sidebar.subheader("Detection Tuning")
 det_conf = st.sidebar.slider("Detection Confidence", 0.1, 0.9, 0.35, 0.05)
@@ -204,6 +205,7 @@ def build_cfg():
         "line_rgb": hex_to_rgb(line_color),
         "workout_mode": workout_mode,
         "debug_logs": show_debug_logs,
+        "show_detection_diagnostics": show_detection_diagnostics,
         "det_conf": det_conf,
         "presence_conf": presence_conf,
         "track_conf": track_conf,
@@ -403,29 +405,29 @@ def process_static(img, landmarks, cfg):
 
 
 def build_image_candidates(image):
-    candidates = [image]
+    candidates = [("original", image)]
 
     pil = Image.fromarray(image)
     mirrored = np.array(pil.transpose(Image.Transpose.FLIP_LEFT_RIGHT))
-    candidates.append(mirrored)
+    candidates.append(("mirrored", mirrored))
 
     enhanced = pil.convert("L")
     enhanced = Image.eval(enhanced, lambda px: 255 if px > 180 else int(px * 1.25))
     enhanced_rgb = np.array(enhanced.convert("RGB"))
-    candidates.append(enhanced_rgb)
+    candidates.append(("enhanced", enhanced_rgb))
 
     enhanced_mirrored = np.array(Image.fromarray(enhanced_rgb).transpose(Image.Transpose.FLIP_LEFT_RIGHT))
-    candidates.append(enhanced_mirrored)
+    candidates.append(("enhanced_mirrored", enhanced_mirrored))
 
     # Deduplicate candidates that may end up identical.
     unique = []
     seen = set()
-    for item in candidates:
+    for name, item in candidates:
         key = hash(item.tobytes())
         if key in seen:
             continue
         seen.add(key)
-        unique.append(item)
+        unique.append((name, item))
     return unique
 
 
@@ -444,6 +446,13 @@ def detect_landmarks_from_image(image, cfg):
     presence_levels = sorted(set(max(0.05, min(0.9, x)) for x in presence_levels), reverse=True)
 
     candidates = build_image_candidates(image)
+    diagnostics = {
+        "det_levels": det_levels,
+        "presence_levels": presence_levels,
+        "attempts": [],
+        "status": "no_pose",
+    }
+
     for det_conf_try in det_levels:
         for presence_conf_try in presence_levels:
             pose_landmarker = get_pose_landmarker(
@@ -458,24 +467,46 @@ def detect_landmarks_from_image(image, cfg):
             fallback_pose = create_fallback_pose(static_image_mode=True, cfg=fallback_cfg)
 
             try:
-                for candidate in candidates:
+                for variant_name, candidate in candidates:
                     landmarks = None
+                    task_hit = False
+                    fallback_hit = False
                     if pose_landmarker:
                         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=candidate)
                         detection_result = pose_landmarker.detect(mp_image)
                         if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                             landmarks = detection_result.pose_landmarks[0]
+                            task_hit = True
 
                     if landmarks is None:
                         landmarks = detect_with_fallback(fallback_pose, candidate)
+                        fallback_hit = landmarks is not None
+
+                    diagnostics["attempts"].append(
+                        {
+                            "variant": variant_name,
+                            "det_conf": round(det_conf_try, 3),
+                            "presence_conf": round(presence_conf_try, 3),
+                            "task_hit": task_hit,
+                            "fallback_hit": fallback_hit,
+                            "success": landmarks is not None,
+                        }
+                    )
 
                     if landmarks is not None:
-                        return landmarks, candidate
+                        diagnostics["status"] = "pose_detected"
+                        diagnostics["winner"] = {
+                            "variant": variant_name,
+                            "det_conf": round(det_conf_try, 3),
+                            "presence_conf": round(presence_conf_try, 3),
+                            "source": "task" if task_hit else "fallback",
+                        }
+                        return landmarks, candidate, diagnostics
             finally:
                 if fallback_pose is not None:
                     fallback_pose.close()
 
-    return None, image
+    return None, image, diagnostics
 
 
 # ---------- Download and load pose landmarker model ----------
@@ -807,7 +838,7 @@ elif input_type == "Upload Image":
         
         cfg = build_cfg()
         try:
-            landmarks, used_image = detect_landmarks_from_image(image, cfg)
+            landmarks, used_image, diagnostics = detect_landmarks_from_image(image, cfg)
 
             if landmarks is not None:
                 st.success("✓ Pose detected")
@@ -815,6 +846,10 @@ elif input_type == "Upload Image":
             else:
                 st.warning("❌ No pose detected in the image. Try a clearer photo with your full body visible.")
                 out = image
+
+            if cfg.get("show_detection_diagnostics"):
+                st.caption("Detection diagnostics")
+                st.json(diagnostics, expanded=False)
         except Exception as e:
             st.error(f"❌ Detection error: {e}")
             if cfg.get("debug_logs"):
@@ -834,13 +869,17 @@ elif input_type == "Camera Snapshot (Stable)":
         image = np.array(Image.open(shot).convert("RGB"))
         cfg = build_cfg()
         try:
-            landmarks, used_image = detect_landmarks_from_image(image, cfg)
+            landmarks, used_image, diagnostics = detect_landmarks_from_image(image, cfg)
             if landmarks is not None:
                 st.success("✓ Pose detected")
                 out = process_static(used_image, landmarks, cfg)
             else:
                 st.warning("❌ No pose detected in snapshot. Keep full body visible and improve lighting.")
                 out = image
+
+            if cfg.get("show_detection_diagnostics"):
+                st.caption("Detection diagnostics")
+                st.json(diagnostics, expanded=False)
         except Exception as e:
             st.error(f"❌ Detection error: {e}")
             if cfg.get("debug_logs"):
