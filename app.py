@@ -458,6 +458,19 @@ def build_image_candidates(image):
     candidates.append(("enhanced_rot90", enhanced_rot90))
     candidates.append(("enhanced_rot270", enhanced_rot270))
 
+    # Multi-scale and padded variants improve small-subject detection.
+    for target in (384, 512, 640):
+        scaled = resize_for_detection(image, max_side=target)
+        candidates.append((f"scaled_{target}", scaled))
+
+    h, w = image.shape[:2]
+    side = max(h, w)
+    square = np.zeros((side, side, 3), dtype=np.uint8)
+    y0 = (side - h) // 2
+    x0 = (side - w) // 2
+    square[y0:y0 + h, x0:x0 + w] = image
+    candidates.append(("square_padded", square))
+
     # Deduplicate candidates that may end up identical.
     unique = []
     seen = set()
@@ -475,11 +488,13 @@ def detect_landmarks_from_image(image, cfg):
         float(cfg.get("det_conf", 0.35)),
         0.25,
         0.15,
+        0.05,
     ]
     presence_levels = [
         float(cfg.get("presence_conf", 0.30)),
         0.20,
         0.10,
+        0.05,
     ]
     det_levels = sorted(set(max(0.05, min(0.9, x)) for x in det_levels), reverse=True)
     presence_levels = sorted(set(max(0.05, min(0.9, x)) for x in presence_levels), reverse=True)
@@ -502,6 +517,7 @@ def detect_landmarks_from_image(image, cfg):
                     cfg.get("track_conf", 0.30),
                     "IMAGE",
                     model_variant,
+                    3,
                 )
                 fallback_cfg = dict(cfg)
                 fallback_cfg["det_conf"] = det_conf_try
@@ -555,7 +571,14 @@ def detect_landmarks_from_image(image, cfg):
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
-def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, running_mode="IMAGE", model_variant="full"):
+def get_pose_landmarker(
+    det_conf=0.35,
+    presence_conf=0.30,
+    track_conf=0.30,
+    running_mode="IMAGE",
+    model_variant="full",
+    num_poses=1,
+):
     variant = str(model_variant).strip().lower()
     if variant not in {"full", "heavy", "lite"}:
         variant = "full"
@@ -603,7 +626,7 @@ def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, runn
         options = vision.PoseLandmarkerOptions(
             base_options=base_options,
             running_mode=mode,
-            num_poses=1,
+            num_poses=max(1, int(num_poses)),
             min_pose_detection_confidence=float(det_conf),
             min_pose_presence_confidence=float(presence_conf),
             min_tracking_confidence=float(track_conf),
