@@ -1,6 +1,7 @@
 import io
 import os
 import hmac
+import importlib
 import streamlit as st
 import numpy as np
 import mediapipe as mp
@@ -21,11 +22,6 @@ except ImportError as e:
     print(f"✗ Error importing mediapipe: {e}")
     st.error(f"❌ Failed to import MediaPipe: {str(e)}\n\nPlease check if mediapipe is properly installed on the system.")
     st.stop()
-
-try:
-    from mediapipe.python.solutions import pose as mp_pose_solution
-except Exception:
-    mp_pose_solution = None
 
 try:
     import av
@@ -137,6 +133,38 @@ POSE_CONNECTIONS = [
     (23, 25), (25, 27), (24, 26), (26, 28),  # Legs
     (27, 29), (29, 31), (28, 30), (30, 32),  # Feet
 ]
+
+_POSE_SOLUTION_MODULE = None
+
+
+def get_pose_solution_module():
+    global _POSE_SOLUTION_MODULE
+    if _POSE_SOLUTION_MODULE is not None:
+        return _POSE_SOLUTION_MODULE
+
+    for module_name in ("mediapipe.solutions.pose", "mediapipe.python.solutions.pose"):
+        try:
+            _POSE_SOLUTION_MODULE = importlib.import_module(module_name)
+            return _POSE_SOLUTION_MODULE
+        except Exception:
+            continue
+
+    _POSE_SOLUTION_MODULE = False
+    return None
+
+
+def create_fallback_pose(static_image_mode, cfg):
+    pose_module = get_pose_solution_module()
+    if not pose_module:
+        return None
+
+    return pose_module.Pose(
+        static_image_mode=static_image_mode,
+        model_complexity=1,
+        enable_segmentation=False,
+        min_detection_confidence=cfg.get("det_conf", 0.35),
+        min_tracking_confidence=cfg.get("track_conf", 0.30),
+    )
 
 # ---------- Sidebar ----------
 st.sidebar.title("Customization Options")
@@ -290,6 +318,14 @@ def draw_landmarks_pil(frame, landmarks, cfg):
     draw = ImageDraw.Draw(pil)
     width, height = pil.size
     
+    def lm_confidence(landmark):
+        scores = []
+        if hasattr(landmark, "presence") and landmark.presence is not None:
+            scores.append(float(landmark.presence))
+        if hasattr(landmark, "visibility") and landmark.visibility is not None:
+            scores.append(float(landmark.visibility))
+        return max(scores) if scores else 1.0
+
     # Draw connections (with lower confidence threshold)
     for connection in POSE_CONNECTIONS:
         if connection[0] < len(landmarks) and connection[1] < len(landmarks):
@@ -297,9 +333,9 @@ def draw_landmarks_pil(frame, landmarks, cfg):
             end = landmarks[connection[1]]
             
             # Skip if confidence is too low (threshold: 0.3 instead of 0.5)
-            if hasattr(start, 'presence') and start.presence < cfg.get("landmark_presence_draw", 0.2):
+            if lm_confidence(start) < cfg.get("landmark_presence_draw", 0.2):
                 continue
-            if hasattr(end, 'presence') and end.presence < cfg.get("landmark_presence_draw", 0.2):
+            if lm_confidence(end) < cfg.get("landmark_presence_draw", 0.2):
                 continue
             
             x1, y1 = int(start.x * width), int(start.y * height)
@@ -314,7 +350,7 @@ def draw_landmarks_pil(frame, landmarks, cfg):
     # Draw circles for landmarks (with lower confidence threshold)
     for landmark in landmarks:
         # Skip if confidence is too low
-        if hasattr(landmark, 'presence') and landmark.presence < cfg.get("landmark_presence_draw", 0.2):
+        if lm_confidence(landmark) < cfg.get("landmark_presence_draw", 0.2):
             continue
         
         x, y = int(landmark.x * width), int(landmark.y * height)
@@ -368,7 +404,7 @@ def process_static(img, landmarks, cfg):
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
-def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30):
+def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, running_mode="IMAGE"):
     model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_full.task")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
@@ -413,13 +449,17 @@ def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30):
             return None
     
     try:
+        mode = vision.RunningMode.IMAGE
+        if str(running_mode).upper() == "VIDEO":
+            mode = vision.RunningMode.VIDEO
+
         base_options = python.BaseOptions(
             model_asset_path=model_path,
             delegate=python.BaseOptions.Delegate.CPU,
         )
         options = vision.PoseLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE,
+            running_mode=mode,
             num_poses=1,
             min_pose_detection_confidence=float(det_conf),
             min_pose_presence_confidence=float(presence_conf),
@@ -442,18 +482,12 @@ class PoseProcessor(VideoProcessorBase):
             self.cfg.get("det_conf", 0.35),
             self.cfg.get("presence_conf", 0.30),
             self.cfg.get("track_conf", 0.30),
+            "VIDEO",
         )
         # Fallback detector is more tolerant on noisy webcam streams.
-        self.pose_fallback = None
-        if mp_pose_solution is not None:
-            self.pose_fallback = mp_pose_solution.Pose(
-                static_image_mode=False,
-                model_complexity=1,
-                enable_segmentation=False,
-                min_detection_confidence=self.cfg.get("det_conf", 0.35),
-                min_tracking_confidence=self.cfg.get("track_conf", 0.30),
-            )
+        self.pose_fallback = create_fallback_pose(static_image_mode=False, cfg=self.cfg)
         self.lock = threading.Lock()
+        self.last_ts_ms = 0
         self.snapshot = None
         self.rep_count = 0
         self.bad_rep_count = 0
@@ -590,7 +624,11 @@ class PoseProcessor(VideoProcessorBase):
         try:
             if self.pose_landmarker:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-                detection_result = self.pose_landmarker.detect(mp_image)
+                ts_ms = int(time.time() * 1000)
+                if ts_ms <= self.last_ts_ms:
+                    ts_ms = self.last_ts_ms + 1
+                self.last_ts_ms = ts_ms
+                detection_result = self.pose_landmarker.detect_for_video(mp_image, ts_ms)
                 if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                     landmarks = detection_result.pose_landmarks[0]
 
@@ -693,17 +731,10 @@ elif input_type == "Upload Image":
             cfg.get("det_conf", 0.35),
             cfg.get("presence_conf", 0.30),
             cfg.get("track_conf", 0.30),
+            "IMAGE",
         )
         
-        fallback_pose = None
-        if mp_pose_solution is not None:
-            fallback_pose = mp_pose_solution.Pose(
-                static_image_mode=True,
-                model_complexity=1,
-                enable_segmentation=False,
-                min_detection_confidence=cfg.get("det_conf", 0.35),
-                min_tracking_confidence=cfg.get("track_conf", 0.30),
-            )
+        fallback_pose = create_fallback_pose(static_image_mode=True, cfg=cfg)
 
         try:
             landmarks = None
@@ -752,16 +783,10 @@ elif input_type == "Upload Video":
                 cfg.get("det_conf", 0.35),
                 cfg.get("presence_conf", 0.30),
                 cfg.get("track_conf", 0.30),
+                "VIDEO",
             )
-            fallback_pose = None
-            if mp_pose_solution is not None:
-                fallback_pose = mp_pose_solution.Pose(
-                    static_image_mode=False,
-                    model_complexity=1,
-                    enable_segmentation=False,
-                    min_detection_confidence=cfg.get("det_conf", 0.35),
-                    min_tracking_confidence=cfg.get("track_conf", 0.30),
-                )
+            fallback_pose = create_fallback_pose(static_image_mode=False, cfg=cfg)
+            frame_idx = 0
             
             for packet in container.demux(video=0):
                 for frame in packet.decode():
@@ -770,7 +795,9 @@ elif input_type == "Upload Video":
                         landmarks = None
                         if pose_landmarker:
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img)
-                            detection_result = pose_landmarker.detect(mp_image)
+                            ts_ms = int((frame.time or (frame_idx / 30.0)) * 1000)
+                            frame_idx += 1
+                            detection_result = pose_landmarker.detect_for_video(mp_image, ts_ms)
                             if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
                                 landmarks = detection_result.pose_landmarks[0]
 
