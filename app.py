@@ -488,110 +488,107 @@ def detect_landmarks_from_image(image, cfg):
     diagnostics = {
         "det_levels": det_levels,
         "presence_levels": presence_levels,
+        "model_variants": ["full", "heavy", "lite"],
         "attempts": [],
         "status": "no_pose",
     }
 
     for det_conf_try in det_levels:
         for presence_conf_try in presence_levels:
-            pose_landmarker = get_pose_landmarker(
-                det_conf_try,
-                presence_conf_try,
-                cfg.get("track_conf", 0.30),
-                "IMAGE",
-            )
-            fallback_cfg = dict(cfg)
-            fallback_cfg["det_conf"] = det_conf_try
-            fallback_cfg["track_conf"] = cfg.get("track_conf", 0.30)
-            fallback_pose = create_fallback_pose(static_image_mode=True, cfg=fallback_cfg)
+            for model_variant in ("full", "heavy", "lite"):
+                pose_landmarker = get_pose_landmarker(
+                    det_conf_try,
+                    presence_conf_try,
+                    cfg.get("track_conf", 0.30),
+                    "IMAGE",
+                    model_variant,
+                )
+                fallback_cfg = dict(cfg)
+                fallback_cfg["det_conf"] = det_conf_try
+                fallback_cfg["track_conf"] = cfg.get("track_conf", 0.30)
+                fallback_pose = create_fallback_pose(static_image_mode=True, cfg=fallback_cfg)
 
-            try:
-                for variant_name, candidate in candidates:
-                    landmarks = None
-                    task_hit = False
-                    fallback_hit = False
-                    if pose_landmarker:
-                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=candidate)
-                        detection_result = pose_landmarker.detect(mp_image)
-                        if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                            landmarks = detection_result.pose_landmarks[0]
-                            task_hit = True
+                try:
+                    for variant_name, candidate in candidates:
+                        landmarks = None
+                        task_hit = False
+                        fallback_hit = False
+                        if pose_landmarker:
+                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=candidate)
+                            detection_result = pose_landmarker.detect(mp_image)
+                            if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                                landmarks = detection_result.pose_landmarks[0]
+                                task_hit = True
 
-                    if landmarks is None:
-                        landmarks = detect_with_fallback(fallback_pose, candidate)
-                        fallback_hit = landmarks is not None
+                        if landmarks is None:
+                            landmarks = detect_with_fallback(fallback_pose, candidate)
+                            fallback_hit = landmarks is not None
 
-                    diagnostics["attempts"].append(
-                        {
-                            "variant": variant_name,
-                            "det_conf": round(det_conf_try, 3),
-                            "presence_conf": round(presence_conf_try, 3),
-                            "task_hit": task_hit,
-                            "fallback_hit": fallback_hit,
-                            "success": landmarks is not None,
-                        }
-                    )
+                        diagnostics["attempts"].append(
+                            {
+                                "model_variant": model_variant,
+                                "variant": variant_name,
+                                "det_conf": round(det_conf_try, 3),
+                                "presence_conf": round(presence_conf_try, 3),
+                                "task_hit": task_hit,
+                                "fallback_hit": fallback_hit,
+                                "success": landmarks is not None,
+                            }
+                        )
 
-                    if landmarks is not None:
-                        diagnostics["status"] = "pose_detected"
-                        diagnostics["winner"] = {
-                            "variant": variant_name,
-                            "det_conf": round(det_conf_try, 3),
-                            "presence_conf": round(presence_conf_try, 3),
-                            "source": "task" if task_hit else "fallback",
-                        }
-                        return landmarks, candidate, diagnostics
-            finally:
-                if fallback_pose is not None:
-                    fallback_pose.close()
+                        if landmarks is not None:
+                            diagnostics["status"] = "pose_detected"
+                            diagnostics["winner"] = {
+                                "model_variant": model_variant,
+                                "variant": variant_name,
+                                "det_conf": round(det_conf_try, 3),
+                                "presence_conf": round(presence_conf_try, 3),
+                                "source": "task" if task_hit else "fallback",
+                            }
+                            return landmarks, candidate, diagnostics
+                finally:
+                    if fallback_pose is not None:
+                        fallback_pose.close()
 
     return None, image, diagnostics
 
 
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
-def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, running_mode="IMAGE"):
-    model_path = os.path.expanduser("~/.mediapipe/pose_landmarker_full.task")
+def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, running_mode="IMAGE", model_variant="full"):
+    variant = str(model_variant).strip().lower()
+    if variant not in {"full", "heavy", "lite"}:
+        variant = "full"
+
+    model_path = os.path.expanduser(f"~/.mediapipe/pose_landmarker_{variant}.task")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     
     if not os.path.exists(model_path):
-        print("[INFO] Downloading pose detection model...")
-        
-        # Multiple model variants with fallback options
-        urls = [
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-        ]
-        
-        downloaded = False
-        last_error = None
-        
-        for url in urls:
-            try:
-                if build_cfg().get("debug_logs"):
-                    print(f"Attempting to download from: {url}")
-                # urlretrieve has no timeout parameter; use urlopen for timeout support.
-                with urllib.request.urlopen(url, timeout=60) as response:
-                    with open(model_path, "wb") as out_file:
-                        out_file.write(response.read())
-                if build_cfg().get("debug_logs"):
-                    print(f"✓ Successfully downloaded model from {url}")
-                downloaded = True
-                break
-            except urllib.error.HTTPError as e:
-                last_error = f"HTTP {e.code}: {e.reason}"
-                print(f"✗ HTTP Error from {url}: {last_error}")
-            except urllib.error.URLError as e:
-                last_error = f"Connection error: {e.reason}"
-                print(f"✗ Connection error for {url}: {last_error}")
-            except Exception as e:
-                last_error = str(e)
-                print(f"✗ Unexpected error for {url}: {last_error}")
-        
-        if not downloaded:
-            error_msg = f"Failed to download model. Last error: {last_error}"
-            print(f"✗ {error_msg}")
+        print(f"[INFO] Downloading pose detection model ({variant})...")
+
+        model_urls = {
+            "full": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+            "heavy": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+            "lite": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+        }
+        url = model_urls[variant]
+
+        try:
+            if build_cfg().get("debug_logs"):
+                print(f"Attempting to download from: {url}")
+            with urllib.request.urlopen(url, timeout=60) as response:
+                with open(model_path, "wb") as out_file:
+                    out_file.write(response.read())
+            if build_cfg().get("debug_logs"):
+                print(f"✓ Successfully downloaded model from {url}")
+        except urllib.error.HTTPError as e:
+            print(f"✗ HTTP Error from {url}: HTTP {e.code}: {e.reason}")
+            return None
+        except urllib.error.URLError as e:
+            print(f"✗ Connection error for {url}: {e.reason}")
+            return None
+        except Exception as e:
+            print(f"✗ Unexpected error for {url}: {e}")
             return None
     
     try:
