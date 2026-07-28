@@ -402,6 +402,31 @@ def process_static(img, landmarks, cfg):
     return draw_and_analyze(rgb, landmarks, cfg)
 
 
+def detect_landmarks_from_image(image, cfg):
+    pose_landmarker = get_pose_landmarker(
+        cfg.get("det_conf", 0.35),
+        cfg.get("presence_conf", 0.30),
+        cfg.get("track_conf", 0.30),
+        "IMAGE",
+    )
+
+    fallback_pose = create_fallback_pose(static_image_mode=True, cfg=cfg)
+    try:
+        landmarks = None
+        if pose_landmarker:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
+            detection_result = pose_landmarker.detect(mp_image)
+            if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
+                landmarks = detection_result.pose_landmarks[0]
+
+        if landmarks is None:
+            landmarks = detect_with_fallback(fallback_pose, image)
+        return landmarks
+    finally:
+        if fallback_pose is not None:
+            fallback_pose.close()
+
+
 # ---------- Download and load pose landmarker model ----------
 @st.cache_resource
 def get_pose_landmarker(det_conf=0.35, presence_conf=0.30, track_conf=0.30, running_mode="IMAGE"):
@@ -660,7 +685,10 @@ RTC_CONFIG = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:
 st.title("Pose Detection and Analysis App")
 st.write("Upload an image or video, or use your live camera to detect and analyze human poses.")
 
-input_type = st.selectbox("Choose input type", ["Live Camera", "Upload Image", "Upload Video"])
+input_type = st.selectbox(
+    "Choose input type",
+    ["Live Camera", "Camera Snapshot (Stable)", "Upload Image", "Upload Video"],
+)
 
 if input_type == "Live Camera":
     st.info("Allow camera access when your browser prompts. Sliders update the stream live.")
@@ -727,25 +755,8 @@ elif input_type == "Upload Image":
         st.info(f"📊 Image shape: {image.shape}, dtype: {image.dtype}")
         
         cfg = build_cfg()
-        pose_landmarker = get_pose_landmarker(
-            cfg.get("det_conf", 0.35),
-            cfg.get("presence_conf", 0.30),
-            cfg.get("track_conf", 0.30),
-            "IMAGE",
-        )
-        
-        fallback_pose = create_fallback_pose(static_image_mode=True, cfg=cfg)
-
         try:
-            landmarks = None
-            if pose_landmarker:
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image)
-                detection_result = pose_landmarker.detect(mp_image)
-                if detection_result.pose_landmarks and len(detection_result.pose_landmarks) > 0:
-                    landmarks = detection_result.pose_landmarks[0]
-
-            if landmarks is None:
-                landmarks = detect_with_fallback(fallback_pose, image)
+            landmarks = detect_landmarks_from_image(image, cfg)
 
             if landmarks is not None:
                 st.success("✓ Pose detected")
@@ -758,15 +769,42 @@ elif input_type == "Upload Image":
             if cfg.get("debug_logs"):
                 print(f"[ERROR] Image upload detection: {e}")
             out = image
-        finally:
-            if fallback_pose is not None:
-                fallback_pose.close()
         
         st.image(out, channels="RGB")
         buffer = io.BytesIO()
         Image.fromarray(out).save(buffer, format="PNG")
         st.download_button("⬇️ Download Result", buffer.getvalue(),
                            file_name="pose_result.png", mime="image/png")
+
+elif input_type == "Camera Snapshot (Stable)":
+    st.info("This mode is recommended on Streamlit Cloud if Live Camera is unstable.")
+    shot = st.camera_input("Take a photo")
+    if shot is not None:
+        image = np.array(Image.open(shot).convert("RGB"))
+        cfg = build_cfg()
+        try:
+            landmarks = detect_landmarks_from_image(image, cfg)
+            if landmarks is not None:
+                st.success("✓ Pose detected")
+                out = process_static(image, landmarks, cfg)
+            else:
+                st.warning("❌ No pose detected in snapshot. Keep full body visible and improve lighting.")
+                out = image
+        except Exception as e:
+            st.error(f"❌ Detection error: {e}")
+            if cfg.get("debug_logs"):
+                print(f"[ERROR] Camera snapshot detection: {e}")
+            out = image
+
+        st.image(out, channels="RGB")
+        buffer = io.BytesIO()
+        Image.fromarray(out).save(buffer, format="PNG")
+        st.download_button(
+            "⬇️ Download Snapshot Result",
+            buffer.getvalue(),
+            file_name="pose_snapshot_result.png",
+            mime="image/png",
+        )
 
 elif input_type == "Upload Video":
     file = st.file_uploader("Upload a video", type=["mp4", "mov", "avi"])

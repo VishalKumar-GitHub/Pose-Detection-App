@@ -11,7 +11,7 @@ A real-time human pose detection and analysis application built with **Streamlit
 
 ## Features
 
-- **Three input modes**: live camera (via WebRTC), image upload, and video upload
+- **Four input modes**: live camera (via WebRTC), camera snapshot (stable), image upload, and video upload
 - **Real-time pose landmark detection** using MediaPipe Pose
 - **Posture analysis** — reports arm bend, leg bend, and back alignment on each frame
 - **Live customization** — adjust text size, colors, circle radius, and line thickness while the camera streams
@@ -27,6 +27,7 @@ Choose an input type from the dropdown, then:
 | Mode | What it does |
 |------|--------------|
 | **Live Camera** | Streams your webcam and overlays pose + analysis in real time |
+| **Camera Snapshot (Stable)** | Uses browser camera capture without WebRTC streaming; best for Streamlit Cloud reliability |
 | **Upload Image** | Detects pose on a single image, with a download button |
 | **Upload Video** | Plays through the video frame by frame with pose overlay |
 
@@ -98,6 +99,8 @@ The repo includes:
 - `runtime.txt` — pins Python 3.11
 
 Live camera works on the deployed app because Streamlit Cloud serves over HTTPS and WebRTC captures the webcam in the browser.
+
+If you see WebRTC retry/disconnect warnings in logs (`aioice` / `Transaction.__retry`), they are typically non-fatal transport cleanup warnings. Use **Camera Snapshot (Stable)** mode for the most reliable cloud pose detection.
 
 ---
 
