@@ -328,14 +328,38 @@ def draw_text_overlay(frame, info, cfg):
     return np.array(pil)
 
 
+def get_named_landmarks():
+    lm = PoseLandmark
+    return [
+        (lm.NOSE, "Nose"),
+        (lm.LEFT_EYE, "Left Eye"),
+        (lm.RIGHT_EYE, "Right Eye"),
+        (lm.LEFT_EAR, "Left Ear"),
+        (lm.RIGHT_EAR, "Right Ear"),
+        (lm.LEFT_SHOULDER, "Left Shoulder"),
+        (lm.RIGHT_SHOULDER, "Right Shoulder"),
+        (lm.LEFT_ELBOW, "Left Elbow"),
+        (lm.RIGHT_ELBOW, "Right Elbow"),
+        (lm.LEFT_WRIST, "Left Hand"),
+        (lm.RIGHT_WRIST, "Right Hand"),
+        (lm.LEFT_HIP, "Left Hip"),
+        (lm.RIGHT_HIP, "Right Hip"),
+        (lm.LEFT_KNEE, "Left Knee"),
+        (lm.RIGHT_KNEE, "Right Knee"),
+        (lm.LEFT_ANKLE, "Left Ankle"),
+        (lm.RIGHT_ANKLE, "Right Ankle"),
+    ]
+
+
 def draw_landmarks_pil(frame, landmarks, cfg):
     if not landmarks:
         return frame
-    
+
     pil = Image.fromarray(frame)
     draw = ImageDraw.Draw(pil)
     width, height = pil.size
-    
+    label_font = get_font(max(10, int(12 * cfg["text_size"])))
+
     def lm_confidence(landmark):
         scores = []
         if hasattr(landmark, "presence") and landmark.presence is not None:
@@ -344,45 +368,81 @@ def draw_landmarks_pil(frame, landmarks, cfg):
             scores.append(float(landmark.visibility))
         return max(scores) if scores else 1.0
 
-    # Draw connections (with lower confidence threshold)
+    def xy(idx):
+        lm = landmarks[idx]
+        vis = lm_confidence(lm)
+        return [lm.x, lm.y], (int(lm.x * width), int(lm.y * height)), vis
+
+    def draw_angle_label(a_idx, b_idx, c_idx, label):
+        if max(a_idx, b_idx, c_idx) >= len(landmarks):
+            return
+        a, _, a_vis = xy(a_idx)
+        b, (bx, by), b_vis = xy(b_idx)
+        c, _, c_vis = xy(c_idx)
+        if min(a_vis, b_vis, c_vis) < cfg.get("landmark_presence_draw", 0.2):
+            return
+        angle = calc_angle(a, b, c)
+        text = f"{label}: {angle:.0f} deg"
+        tx = min(max(bx + 8, 0), width - 1)
+        ty = min(max(by + 8, 0), height - 1)
+        draw.text((tx, ty), text, fill=cfg["text_rgb"], font=label_font)
+
+    # Draw connections (with confidence threshold)
     for connection in POSE_CONNECTIONS:
         if connection[0] < len(landmarks) and connection[1] < len(landmarks):
             start = landmarks[connection[0]]
             end = landmarks[connection[1]]
-            
-            # Skip if confidence is too low (threshold: 0.3 instead of 0.5)
+
             if lm_confidence(start) < cfg.get("landmark_presence_draw", 0.2):
                 continue
             if lm_confidence(end) < cfg.get("landmark_presence_draw", 0.2):
                 continue
-            
+
             x1, y1 = int(start.x * width), int(start.y * height)
             x2, y2 = int(end.x * width), int(end.y * height)
-            
+
             # Clamp to frame bounds
             x1, y1 = max(0, min(width-1, x1)), max(0, min(height-1, y1))
             x2, y2 = max(0, min(width-1, x2)), max(0, min(height-1, y2))
-            
+
             draw.line([(x1, y1), (x2, y2)], fill=cfg["line_rgb"], width=cfg["line_thickness"])
-    
-    # Draw circles for landmarks (with lower confidence threshold)
+
+    # Draw circles for landmarks
     for landmark in landmarks:
         # Skip if confidence is too low
         if lm_confidence(landmark) < cfg.get("landmark_presence_draw", 0.2):
             continue
-        
+
         x, y = int(landmark.x * width), int(landmark.y * height)
-        
+
         # Clamp to frame bounds
         x = max(0, min(width-1, x))
         y = max(0, min(height-1, y))
-        
+
         radius = cfg["circle_radius"]
         draw.ellipse(
             [(x - radius, y - radius), (x + radius, y + radius)],
             fill=cfg["circle_rgb"], outline=cfg["circle_rgb"],
         )
-    
+
+    for idx, name in get_named_landmarks():
+        if idx >= len(landmarks):
+            continue
+        landmark = landmarks[idx]
+        if lm_confidence(landmark) < cfg.get("landmark_presence_draw", 0.2):
+            continue
+
+        x, y = int(landmark.x * width), int(landmark.y * height)
+        label_x = min(max(x + 6, 0), width - 1)
+        label_y = min(max(y - 18, 0), height - 1)
+        draw.text((label_x, label_y), name, fill=cfg["text_rgb"], font=label_font)
+
+    lm = PoseLandmark
+    draw_angle_label(lm.LEFT_SHOULDER, lm.LEFT_ELBOW, lm.LEFT_WRIST, "L Elbow")
+    draw_angle_label(lm.RIGHT_SHOULDER, lm.RIGHT_ELBOW, lm.RIGHT_WRIST, "R Elbow")
+    draw_angle_label(lm.LEFT_HIP, lm.LEFT_KNEE, lm.LEFT_ANKLE, "L Knee")
+    draw_angle_label(lm.RIGHT_HIP, lm.RIGHT_KNEE, lm.RIGHT_ANKLE, "R Knee")
+
     return np.array(pil)
 
 
