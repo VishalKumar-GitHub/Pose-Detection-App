@@ -10,6 +10,7 @@ import tempfile
 import threading
 import urllib.request
 import time
+import uuid
 
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -630,22 +631,15 @@ def detect_landmarks_from_image(image, cfg):
 
 
 # ---------- Download and load pose landmarker model ----------
-@st.cache_resource
-def get_pose_landmarker(
-    det_conf=0.35,
-    presence_conf=0.30,
-    track_conf=0.30,
-    running_mode="IMAGE",
-    model_variant="full",
-    num_poses=1,
-):
+@st.cache_data
+def ensure_pose_model_path(model_variant="full"):
     variant = str(model_variant).strip().lower()
     if variant not in {"full", "heavy", "lite"}:
         variant = "full"
 
     model_path = os.path.expanduser(f"~/.mediapipe/pose_landmarker_{variant}.task")
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    
+
     if not os.path.exists(model_path):
         print(f"[INFO] Downloading pose detection model ({variant})...")
 
@@ -673,6 +667,21 @@ def get_pose_landmarker(
         except Exception as e:
             print(f"✗ Unexpected error for {url}: {e}")
             return None
+
+    return model_path
+
+
+def get_pose_landmarker(
+    det_conf=0.35,
+    presence_conf=0.30,
+    track_conf=0.30,
+    running_mode="IMAGE",
+    model_variant="full",
+    num_poses=1,
+):
+    model_path = ensure_pose_model_path(model_variant)
+    if not model_path:
+        return None
     
     try:
         mode = vision.RunningMode.IMAGE
@@ -730,6 +739,13 @@ class PoseProcessor(VideoProcessorBase):
         self.rep_timestamps = []
         self.rep_depths = []
         self.current_rep_min_knee = 180.0
+
+    def __del__(self):
+        try:
+            if self.pose_fallback is not None:
+                self.pose_fallback.close()
+        except Exception:
+            pass
 
     def reset_set_stats(self):
         self.rep_count = 0
@@ -908,8 +924,11 @@ input_type = st.selectbox(
 
 if input_type == "Live Camera":
     st.info("Allow camera access when your browser prompts. Sliders update the stream live.")
+    if "live_webrtc_key" not in st.session_state:
+        st.session_state.live_webrtc_key = f"pose_{uuid.uuid4().hex}"
+
     ctx = webrtc_streamer(
-        key="pose",
+        key=st.session_state.live_webrtc_key,
         video_processor_factory=PoseProcessor,
         rtc_configuration=RTC_CONFIG,
         media_stream_constraints={"video": True, "audio": False},
